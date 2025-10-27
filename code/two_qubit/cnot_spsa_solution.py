@@ -39,6 +39,52 @@ def build_area_matched_gaussian(n_steps: int, dt: float, target_angle: float = n
     Q = np.zeros_like(I)
     return np.column_stack([I, Q])
 
+# 使用多段高斯叠加
+def gaussian(x, mu, sigma):
+    return np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+
+def multi_gaussian_initial_guess(n_steps, dt):
+    t = np.linspace(0, n_steps * dt, n_steps)
+    pulse_I = (
+        gaussian(t, mu=37.5e-9, sigma=10e-9) +
+        gaussian(t, mu=112.5e-9, sigma=15e-9)
+    )
+    pulse_Q = 0.5 * gaussian(t, mu=75e-9, sigma=20e-9)  # 弱Q驱动
+    return np.column_stack([pulse_I, pulse_Q]) * 50e6  # 缩放到合理振幅(rad/s)
+
+def cnot_optimized_initial_guess(n_steps, dt):
+    """
+    为CNOT门设计的优化初始脉冲，考虑色散耦合区域的物理特性
+    - 使用多个高斯峰组合，覆盖脉冲全过程
+    - 调整I/Q通道的相位关系，增强CNOT门的纠缠特性
+    - 考虑泄漏抑制和振幅平滑过渡
+    """
+    t = np.linspace(0, n_steps * dt, n_steps)
+    total_time = n_steps * dt
+    
+    # I通道：使用3个高斯峰，分别对应CNOT门的三个关键阶段
+    pulse_I = (
+        1.2 * gaussian(t, mu=0.25*total_time, sigma=0.08*total_time) +
+        1.0 * gaussian(t, mu=0.50*total_time, sigma=0.10*total_time) +
+        0.8 * gaussian(t, mu=0.75*total_time, sigma=0.08*total_time)
+    )
+    
+    # Q通道：使用相位延迟的高斯峰，增强相干性
+    pulse_Q = (
+        0.3 * gaussian(t, mu=0.20*total_time, sigma=0.07*total_time) +
+        0.7 * gaussian(t, mu=0.50*total_time, sigma=0.09*total_time) +
+        0.4 * gaussian(t, mu=0.80*total_time, sigma=0.07*total_time)
+    )
+    
+    # 添加一个缓慢上升和下降的包络，减少边缘处的导数惩罚
+    envelope = 0.5 * (1 - np.cos(2 * np.pi * np.arange(n_steps) / (n_steps - 1)))
+    pulse_I *= envelope
+    pulse_Q *= envelope
+    
+    # 缩放到合理振幅，考虑系统参数
+    scaling_factor = 70e6  # 稍高于之前的值，以提高初始保真度
+    return np.column_stack([pulse_I, pulse_Q]) * scaling_factor  # rad/s
+
 
 def knots_to_pulses(knots: np.ndarray, n_steps: int, smooth_len: int = 5) -> np.ndarray:
     """
@@ -198,6 +244,9 @@ class RobustOpenSystemSPSA:
             if f_x > best_score:
                 best_score = f_x
                 best_x = x.copy()
+                pulses_best = self.vec_to_pulses(best_x)
+                # 保存脉冲
+                np.save(f"cnot_spsa_pulses.npy", pulses_best)
 
             # 记录迭代时间
             iter_time = time.time() - iter_start_time
@@ -229,8 +278,10 @@ class RobustOpenSystemSPSA:
         Phase1: 快速粗搜（少shots、少seeds）
         Phase2: 默认shots与多seed做精修
         """
-        # 构建初始脉冲（高斯面积匹配），高斯形状在量子控制中通常是较好的初始猜测。分数刚开始积极很高
-        pulses_init = build_area_matched_gaussian(self.n_steps, self.dt, target_angle=np.pi)
+        # 构建初始脉冲，使用专为CNOT门优化的初始猜测
+        # pulses_init = build_area_matched_gaussian(self.n_steps, self.dt, target_angle=np.pi)
+        # pulses_init = multi_gaussian_initial_guess(self.n_steps, self.dt)
+        pulses_init = cnot_optimized_initial_guess(self.n_steps, self.dt)
         x0 = self.pulses_to_init_vec(pulses_init)
 
         print("Phase 1: 粗搜开始")
@@ -295,15 +346,15 @@ if __name__ == "__main__":
         grader=grader,
         n_steps=300,
         dt=5e-10,
-        K=20,              # 20个结点 -> 300步插值
+        K=150,              # 20个结点 -> 300步插值
         Amax_MHz=200.0,    # 幅度上限 2π×200 MHz
         smooth_len=5,      # 轻度平滑窗口
         rng_seed=1234
     )
 
     pulses_best, results = optimizer.run(
-        phase1_iters=1,      # 可按算力调节（越大一般越好）
-        phase2_iters=1,
+        phase1_iters=50, 
+        phase2_iters=80,
         phase1_shots=5,
         phase1_seeds=(11, 22),
         phase2_shots=10,

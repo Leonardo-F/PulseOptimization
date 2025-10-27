@@ -203,6 +203,10 @@ class RobustOpenSystemSPSA:
                 best_score = f_x
                 best_x = x.copy()
 
+                pulses_best, phi_best = self.vec_to_pulses_phi(best_x)
+                # 保存脉冲
+                np.save("pulses_spsa.npy", pulses_best)
+
             # 记录迭代时间
             iter_time = time.time() - iter_start_time
 
@@ -236,11 +240,14 @@ class RobustOpenSystemSPSA:
         # 构建初始脉冲（高斯面积匹配），高斯形状在量子控制中通常是较好的初始猜测。分数刚开始积极很高
         pulses_init = build_area_matched_gaussian(self.n_steps, self.dt, target_angle=np.pi/2)
         x0 = self.pulses_to_init_vec(pulses_init, phi_init=0.0)
+        init_score = self.evaluate_score(pulses_init, phi=0.0, seeds=[42], n_shots=phase1_shots)
+        # 初始分数，使用42作为seed，重复两次，取平均
+        print(f"初始分数: {init_score:.6f}")
 
         print("Phase 1: 粗搜开始")
         x_best, s_best, hist1 = self.spsa_optimize(
             x0=x0, max_iter=phase1_iters,
-            a=0.20, c=0.12, alpha=0.602, gamma=0.101, A=10.0,
+            a=0.05, c=0.04, alpha=0.602, gamma=0.101, A=10.0,
             n_shots=phase1_shots, seeds=list(phase1_seeds),
             print_every=10
         )
@@ -251,7 +258,7 @@ class RobustOpenSystemSPSA:
         print("Phase 2: 精修开始")
         x_best2, s_best2, hist2 = self.spsa_optimize(
             x0=x_best, max_iter=phase2_iters,
-            a=0.12, c=0.08, alpha=0.602, gamma=0.101, A=10.0,
+            a=0.05, c=0.004, alpha=0.602, gamma=0.101, A=10.0,
             n_shots=phase2_shots, seeds=list(phase2_seeds),
             print_every=10
         )
@@ -310,10 +317,10 @@ if __name__ == "__main__":
     pulses_best, phi_best = optimizer.run(
         phase1_iters=50,         # 可按算力调节（越大一般越好）
         phase2_iters=80,
-        phase1_shots=7,
-        phase1_seeds=(11, 22),
+        phase1_shots=15,
+        phase1_seeds=[11,42],
         phase2_shots=15,
-        phase2_seeds=(101, 202, 303),
+        phase2_seeds=[42],
         save_prefix="spsa"
     )
 

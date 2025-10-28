@@ -157,7 +157,6 @@ class RobustOpenSystemSPSA:
         A: float = 10.0,
         n_shots: int = 15,
         seeds: List[int] = (42, 123),
-        print_every: int = 10,
         x_clip: float = 3.0,
     ) -> Tuple[np.ndarray, float, dict]:
         """
@@ -225,62 +224,58 @@ class RobustOpenSystemSPSA:
         return best_x, best_score, hist
 
     def run(self,
-            phase1_iters: int = 150,
-            phase2_iters: int = 80,
-            phase1_shots: int = 7,
-            phase1_seeds: List[int] = (11, 22),
-            phase2_shots: int = 15,
-            phase2_seeds: List[int] = (101, 202, 303),
-            save_prefix: str = "sqrtx_open_system") -> Tuple[np.ndarray, float, dict]:
+            iters: int = 100,
+            shots: int = 7,
+            seeds: List[int] = (11, 22),
+            init_method: str = "gaussian") -> Tuple[np.ndarray, float, dict]:
         """
-        两阶段鲁棒优化流程：
-        Phase1: 快速粗搜（少shots、少seeds）
-        Phase2: 默认shots与多seed做精修
+        init_method: 构建初始脉冲，默认使用高斯
         """
-        # 构建初始脉冲（高斯面积匹配），高斯形状在量子控制中通常是较好的初始猜测。分数刚开始积极很高
-        pulses_init = build_area_matched_gaussian(self.n_steps, self.dt, target_angle=np.pi/2)
+        print("计算初始分数")
+        init_time = time.time()
+        if init_method == "gaussian":
+            # 构建初始脉冲（高斯面积匹配），高斯形状在量子控制中通常是较好的初始猜测。分数初始就很高
+            pulses_init = build_area_matched_gaussian(self.n_steps, self.dt, target_angle=np.pi/2)
+            # 优化参数
+            a=0.05
+            c=0.04
+        elif init_method == "random":
+            # 构建初始脉冲（随机）
+            pulses_init = self.rng.uniform(-1.0, 1.0, size=(self.n_steps, 2))
+            a=0.1
+            c=0.1
+        else:
+            raise ValueError(f"未知的初始脉冲构建方法: {init_method}")
+
         x0 = self.pulses_to_init_vec(pulses_init, phi_init=0.0)
-        init_score = self.evaluate_score(pulses_init, phi=0.0, seeds=[42], n_shots=phase1_shots)
-        # 初始分数，使用42作为seed，重复两次，取平均
-        print(f"初始分数: {init_score:.6f}")
+        init_score = self.evaluate_score(pulses_init, phi=0.0, seeds=[42], n_shots=shots)
+        init_time = time.time() - init_time
+        # 初始分数，使用42作为seed
+        print(f"初始分数: {init_score:.6f}, 初始消耗时间: {init_time:.2f}s")
 
-        print("Phase 1: 粗搜开始")
-        x_best, s_best, hist1 = self.spsa_optimize(
-            x0=x0, max_iter=phase1_iters,
-            a=0.05, c=0.04, alpha=0.602, gamma=0.101, A=10.0,
-            n_shots=phase1_shots, seeds=list(phase1_seeds),
-            print_every=10
-        )
-        # pulses_p1, phi_p1 = self.vec_to_pulses_phi(x_best)
-        print(f"Phase 1结束: best_score={s_best:.6f}")
+        print("开始优化迭代")
+        x_best, final_score, iter_hist = self.spsa_optimize(
+            x0=x0, max_iter=iters,
+            a=a, c=c, alpha=0.602, gamma=0.101, A=10.0,
+            n_shots=shots, seeds=list(seeds))
+        print(f"优化结束: best_score={final_score:.6f}")
 
-        # Phase 2: 精修（n_shots=15、多seed）
-        print("Phase 2: 精修开始")
-        x_best2, s_best2, hist2 = self.spsa_optimize(
-            x0=x_best, max_iter=phase2_iters,
-            a=0.05, c=0.004, alpha=0.602, gamma=0.101, A=10.0,
-            n_shots=phase2_shots, seeds=list(phase2_seeds),
-            print_every=10
-        )
-        pulses_best, phi_best = self.vec_to_pulses_phi(x_best2)
-        final_score = self.evaluate_score(pulses_best, phi_best, seeds=list(phase2_seeds), n_shots=phase2_shots)
-        print(f"Phase 2结束: best_score={final_score:.6f}")
+        # 输出当前最优的脉冲
+        pulses_best, phi_best = self.vec_to_pulses_phi(x_best)
 
+        # 将初始分数 init_score 存到 iter_hist 中，且不影响其他值
+        iter_hist.append({
+            "初始分数": init_score,
+        })
+        
         # 保存脉冲
-        np.save("pulses_spsa.npy", pulses_best)
-        print("已保存脉冲到 pulses_spsa.npy")
+        np.save(f"pulses_spsa_{init_method}.npy", pulses_best)
+        print(f"已保存脉冲到 pulses_spsa_{init_method}.npy")
 
         # 存储历史记录
-        with open(f"{save_prefix}_history_phase1.json", 'w') as f:
-            json.dump(hist1, f)
-        with open(f"{save_prefix}_history_phase2.json", 'w') as f:
-            json.dump(hist2, f)
-        print(f"已保存历史记录到 {save_prefix}_history_phase1.json 和 {save_prefix}_history_phase2.json")
-
-
-        # 最终正式评分（比赛默认：n_shots=15、seed可固定一个或取平均）
-        final_results = self.grader.grade_submission(pulses_best, phi_best, n_shots=15, seed=42, verbose=True)
-        self.grader.save_results(final_results, f"{save_prefix}_results.json")
+        with open(f"history_spsa_{init_method}.json", 'w') as f:
+            json.dump(iter_hist, f)
+        print(f"已保存历史记录到 history_spsa_{init_method}.json")
 
         return pulses_best, phi_best
 
@@ -315,13 +310,13 @@ if __name__ == "__main__":
     )
 
     pulses_best, phi_best = optimizer.run(
-        phase1_iters=50,         # 可按算力调节（越大一般越好）
-        phase2_iters=80,
-        phase1_shots=15,
-        phase1_seeds=[11,42],
-        phase2_shots=15,
-        phase2_seeds=[42],
-        save_prefix="spsa"
+        iters=100,
+        shots=15,
+        seeds=[42],
+        init_method="random"
     )
+
+    # 输出最终得分
+    print(f"最终得分: {grader.grade_submission(pulses_best, phi_best, verbose=False)['overall_score']:.6f}")
 
 

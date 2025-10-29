@@ -1,3 +1,4 @@
+# cnot_pulse_optimization_simple.py
 import os
 import time
 import numpy as np
@@ -39,52 +40,6 @@ def build_area_matched_gaussian(n_steps: int, dt: float, target_angle: float = n
     Q = np.zeros_like(I)
     return np.column_stack([I, Q])
 
-# 使用多段高斯叠加
-def gaussian(x, mu, sigma):
-    return np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-
-def multi_gaussian_initial_guess(n_steps, dt):
-    t = np.linspace(0, n_steps * dt, n_steps)
-    pulse_I = (
-        gaussian(t, mu=37.5e-9, sigma=10e-9) +
-        gaussian(t, mu=112.5e-9, sigma=15e-9)
-    )
-    pulse_Q = 0.5 * gaussian(t, mu=75e-9, sigma=20e-9)  # 弱Q驱动
-    return np.column_stack([pulse_I, pulse_Q]) * 50e6  # 缩放到合理振幅(rad/s)
-
-def cnot_optimized_initial_guess(n_steps, dt):
-    """
-    为CNOT门设计的优化初始脉冲，考虑色散耦合区域的物理特性
-    - 使用多个高斯峰组合，覆盖脉冲全过程
-    - 调整I/Q通道的相位关系，增强CNOT门的纠缠特性
-    - 考虑泄漏抑制和振幅平滑过渡
-    """
-    t = np.linspace(0, n_steps * dt, n_steps)
-    total_time = n_steps * dt
-    
-    # I通道：使用3个高斯峰，分别对应CNOT门的三个关键阶段
-    pulse_I = (
-        1.2 * gaussian(t, mu=0.25*total_time, sigma=0.08*total_time) +
-        1.0 * gaussian(t, mu=0.50*total_time, sigma=0.10*total_time) +
-        0.8 * gaussian(t, mu=0.75*total_time, sigma=0.08*total_time)
-    )
-    
-    # Q通道：使用相位延迟的高斯峰，增强相干性
-    pulse_Q = (
-        0.3 * gaussian(t, mu=0.20*total_time, sigma=0.07*total_time) +
-        0.7 * gaussian(t, mu=0.50*total_time, sigma=0.09*total_time) +
-        0.4 * gaussian(t, mu=0.80*total_time, sigma=0.07*total_time)
-    )
-    
-    # 添加一个缓慢上升和下降的包络，减少边缘处的导数惩罚
-    envelope = 0.5 * (1 - np.cos(2 * np.pi * np.arange(n_steps) / (n_steps - 1)))
-    pulse_I *= envelope
-    pulse_Q *= envelope
-    
-    # 缩放到合理振幅，考虑系统参数
-    scaling_factor = 70e6  # 稍高于之前的值，以提高初始保真度
-    return np.column_stack([pulse_I, pulse_Q]) * scaling_factor  # rad/s
-
 
 def knots_to_pulses(knots: np.ndarray, n_steps: int, smooth_len: int = 5) -> np.ndarray:
     """
@@ -107,9 +62,9 @@ def knots_to_pulses(knots: np.ndarray, n_steps: int, smooth_len: int = 5) -> np.
     return arr
 
 
-class RobustOpenSystemSPSA:
+class CNOTPulseOptimizer:
     """
-    开放系统CNOT门鲁棒脉冲优化（SPSA + 带限参数化）
+    开放系统CNOT门脉冲优化（SPSA + 带限参数化）
     - 变量：I/Q各K个结点（共2K维）
     - 目标：最大化评分器overall_score（平均多个seed，包含n_shots的ensemble）
     """
@@ -199,7 +154,6 @@ class RobustOpenSystemSPSA:
         A: float = 10.0,
         n_shots: int = 10,
         seeds: List[int] = (42, 123),
-        print_every: int = 10,
         x_clip: float = 3.0,
     ) -> Tuple[np.ndarray, float, dict]:
         """
@@ -246,7 +200,7 @@ class RobustOpenSystemSPSA:
                 best_x = x.copy()
                 pulses_best = self.vec_to_pulses(best_x)
                 # 保存脉冲
-                np.save(f"cnot_spsa_pulses.npy", pulses_best)
+                np.save("cnot_pulses_optimized.npy", pulses_best)
 
             # 记录迭代时间
             iter_time = time.time() - iter_start_time
@@ -266,61 +220,63 @@ class RobustOpenSystemSPSA:
         return best_x, best_score, hist
 
     def run(self,
-            phase1_iters: int = 150,
-            phase2_iters: int = 80,
-            phase1_shots: int = 5,
-            phase1_seeds: List[int] = (11, 22),
-            phase2_shots: int = 10,
-            phase2_seeds: List[int] = (101, 202, 303),
-            save_prefix: str = "cnot_open_system") -> Tuple[np.ndarray, dict]:
+            iters: int = 200,
+            shots: int = 10,
+            seeds: List[int] = (42, 123),
+            init_method: str = "gaussian") -> Tuple[np.ndarray, dict]:
         """
-        两阶段鲁棒优化流程：
-        Phase1: 快速粗搜（少shots、少seeds）
-        Phase2: 默认shots与多seed做精修
+        单阶段优化流程
+        init_method: 构建初始脉冲，默认使用高斯
         """
-        # 构建初始脉冲，使用专为CNOT门优化的初始猜测
-        # pulses_init = build_area_matched_gaussian(self.n_steps, self.dt, target_angle=np.pi)
-        # pulses_init = multi_gaussian_initial_guess(self.n_steps, self.dt)
-        pulses_init = cnot_optimized_initial_guess(self.n_steps, self.dt)
+        print("计算初始分数...")
+        init_time = time.time()
+        
+        if init_method == "gaussian":
+            # 构建初始脉冲（高斯面积匹配）
+            pulses_init = build_area_matched_gaussian(self.n_steps, self.dt, target_angle=np.pi)
+            a = 0.15
+            c = 0.10
+        else:
+            # 构建初始脉冲（随机）
+            pulses_init = self.rng.uniform(-1.0, 1.0, size=(self.n_steps, 2)) * self.Amax
+            a = 0.20
+            c = 0.12
+
         x0 = self.pulses_to_init_vec(pulses_init)
+        init_score = self.evaluate_score(pulses_init, seeds=[42], n_shots=shots)
+        init_time = time.time() - init_time
+        print(f"初始分数: {init_score:.6f}, 初始消耗时间: {init_time:.2f}s")
 
-        print("Phase 1: 粗搜开始")
-        x_best, s_best, hist1 = self.spsa_optimize(
-            x0=x0, max_iter=phase1_iters,
-            a=0.20, c=0.12, alpha=0.602, gamma=0.101, A=10.0,
-            n_shots=phase1_shots, seeds=list(phase1_seeds),
-            print_every=10
-        )
-        print(f"Phase 1结束: best_score={s_best:.6f}")
+        print("开始优化迭代...")
+        x_best, final_score, iter_hist = self.spsa_optimize(
+            x0=x0, max_iter=iters,
+            a=a, c=c, alpha=0.602, gamma=0.101, A=10.0,
+            n_shots=shots, seeds=list(seeds))
+        print(f"优化结束: best_score={final_score:.6f}")
 
-        # Phase 2: 精修（n_shots=10、多seed）
-        print("Phase 2: 精修开始")
-        x_best2, s_best2, hist2 = self.spsa_optimize(
-            x0=x_best, max_iter=phase2_iters,
-            a=0.12, c=0.08, alpha=0.602, gamma=0.101, A=10.0,
-            n_shots=phase2_shots, seeds=list(phase2_seeds),
-            print_every=10
-        )
-        pulses_best = self.vec_to_pulses(x_best2)
-        final_score = self.evaluate_score(pulses_best, seeds=list(phase2_seeds), n_shots=phase2_shots)
-        print(f"Phase 2结束: best_score={final_score:.6f}")
+        # 输出当前最优的脉冲
+        pulses_best = self.vec_to_pulses(x_best)
 
+        # 将初始分数 init_score 存到 iter_hist 中
+        iter_hist.append({
+            "初始分数": init_score,
+        })
+        
         # 保存脉冲
-        np.save(f"{save_prefix}_pulses.npy", pulses_best)
-        print(f"已保存脉冲到 {save_prefix}_pulses.npy")
+        np.save(f"cnot_pulses_{init_method}.npy", pulses_best)
+        print(f"已保存脉冲到 cnot_pulses_{init_method}.npy")
 
         # 存储历史记录
-        with open(f"{save_prefix}_history_phase1.json", 'w') as f:
-            json.dump(hist1, f)
-        with open(f"{save_prefix}_history_phase2.json", 'w') as f:
-            json.dump(hist2, f)
-        print(f"已保存历史记录到 {save_prefix}_history_phase1.json 和 {save_prefix}_history_phase2.json")
+        with open(f"cnot_history_{init_method}.json", 'w') as f:
+            json.dump(iter_hist, f)
+        print(f"已保存历史记录到 cnot_history_{init_method}.json")
 
-        # 最终正式评分（比赛默认：n_shots=10、seed可固定一个或取平均）
+        # 最终正式评分
         final_results = self.grader.grade_submission(pulses_best, n_shots=10, seed=42, verbose=True)
-        self.grader.save_results(final_results, f"{save_prefix}_results.json")
+        self.grader.save_results(final_results, f"cnot_results_{init_method}.json")
 
         return pulses_best, final_results
+
 
 if __name__ == "__main__":
     # 初始化官方评分器（双比特CNOT）
@@ -342,22 +298,19 @@ if __name__ == "__main__":
         A_penalty=0.1
     )
 
-    optimizer = RobustOpenSystemSPSA(
+    optimizer = CNOTPulseOptimizer(
         grader=grader,
         n_steps=300,
         dt=5e-10,
-        K=150,              # 20个结点 -> 300步插值
+        K=50,              # 20个结点 -> 300步插值
         Amax_MHz=200.0,    # 幅度上限 2π×200 MHz
         smooth_len=5,      # 轻度平滑窗口
         rng_seed=1234
     )
 
     pulses_best, results = optimizer.run(
-        phase1_iters=50, 
-        phase2_iters=80,
-        phase1_shots=5,
-        phase1_seeds=(11, 22),
-        phase2_shots=10,
-        phase2_seeds=(101, 202, 303),
-        save_prefix="cnot_spsa"
+        iters=200,
+        shots=10,
+        seeds=[42, 123],
+        init_method="gaussian"
     )

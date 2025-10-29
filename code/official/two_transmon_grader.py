@@ -293,10 +293,11 @@ class DispersiveCNOTPulseGrader:
         b0 = qt.basis(self.nq, 0)
         b1 = qt.basis(self.nq, 1)
         plus = (b0 + b1).unit()
-        minus = (b0 - b1).unit()
-        plus_i = (b0 + 1j * b1).unit()
-        minus_i = (b0 - 1j * b1).unit()
-        sq = [b0, b1, plus, minus, plus_i, minus_i]
+        # minus = (b0 - b1).unit()
+        # plus_i = (b0 + 1j * b1).unit()
+        # minus_i = (b0 - 1j * b1).unit()
+        # sq = [b0, b1, plus, minus, plus_i, minus_i]
+        sq = [b0, b1, plus]
         # Tensor products for two qubits
         states = []
         for s1 in sq:
@@ -336,7 +337,8 @@ class DispersiveCNOTPulseGrader:
             n_shots = self.n_shots
         rng = np.random.RandomState(seed)
 
-        accum = [0 for _ in range(36)]
+        # accum = [0 for _ in range(36)]
+        accum = [0 for _ in range(9)]
         for s in range(n_shots):
             d1 = rng.normal(0.0, self.sigma_detune_q1)
             d2 = rng.normal(0.0, self.sigma_detune_q2)
@@ -344,7 +346,8 @@ class DispersiveCNOTPulseGrader:
             if s == 0:
                 accum = finals
             else:
-                accum = [accum[i] + finals[i] for i in range(36)]
+                # accum = [accum[i] + finals[i] for i in range(36)]
+                accum = [accum[i] + finals[i] for i in range(9)]
         avg = [rho / n_shots for rho in accum]
         return avg
 
@@ -370,7 +373,8 @@ class DispersiveCNOTPulseGrader:
         inputs = [qt.tensor(s1, s2) for s1 in sq for s2 in sq]
 
         fidelities = []
-        for i in range(36):
+        # for i in range(36):
+        for i in range(9):
             rho = avg_states[i]
             rho_corr = self.U_target.dag() * rho * self.U_target
             F_i = qt.expect(qt.ket2dm(inputs[i]), rho_corr)

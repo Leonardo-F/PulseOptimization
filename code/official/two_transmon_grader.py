@@ -3,6 +3,36 @@ import qutip as qt
 from scipy.interpolate import interp1d
 from typing import List, Tuple, Optional, Dict
 import json
+from multiprocessing import Pool
+import time
+
+# 用于多进程模拟
+def worker_shot(args):
+    """Worker function for a single shot"""
+    self, pulses, d1, d2 = args
+    return self.simulate_one_shot(pulses, (d1, d2))
+
+def compare_density_matrices(avg_states, avg_states_2, tolerance=1e-10):
+    """
+    比较两个密度矩阵列表是否一致
+    """
+    if len(avg_states) != len(avg_states_2):
+        print(f"列表长度不同: {len(avg_states)} vs {len(avg_states_2)}")
+        return False, float('inf')
+    
+    max_diff = 0.0
+    for i, (rho1, rho2) in enumerate(zip(avg_states, avg_states_2)):
+        # 计算两个密度矩阵的差异
+        diff_matrix = rho1.full() - rho2.full()
+        current_max_diff = np.max(np.abs(diff_matrix))
+        max_diff = max(max_diff, current_max_diff)
+        
+        if current_max_diff > tolerance:
+            print(f"第 {i} 个密度矩阵差异过大: {current_max_diff}")
+            return False, max_diff
+    
+    print(f"所有密度矩阵一致，最大差异: {max_diff}")
+    return True, max_diff
 
 
 class DispersiveCNOTPulseGrader:
@@ -293,11 +323,10 @@ class DispersiveCNOTPulseGrader:
         b0 = qt.basis(self.nq, 0)
         b1 = qt.basis(self.nq, 1)
         plus = (b0 + b1).unit()
-        # minus = (b0 - b1).unit()
-        # plus_i = (b0 + 1j * b1).unit()
-        # minus_i = (b0 - 1j * b1).unit()
-        # sq = [b0, b1, plus, minus, plus_i, minus_i]
-        sq = [b0, b1, plus]
+        minus = (b0 - b1).unit()
+        plus_i = (b0 + 1j * b1).unit()
+        minus_i = (b0 - 1j * b1).unit()
+        sq = [b0, b1, plus, minus, plus_i, minus_i]
         # Tensor products for two qubits
         states = []
         for s1 in sq:
@@ -337,8 +366,7 @@ class DispersiveCNOTPulseGrader:
             n_shots = self.n_shots
         rng = np.random.RandomState(seed)
 
-        # accum = [0 for _ in range(36)]
-        accum = [0 for _ in range(9)]
+        accum = [0 for _ in range(36)]
         for s in range(n_shots):
             d1 = rng.normal(0.0, self.sigma_detune_q1)
             d2 = rng.normal(0.0, self.sigma_detune_q2)
@@ -346,10 +374,40 @@ class DispersiveCNOTPulseGrader:
             if s == 0:
                 accum = finals
             else:
-                # accum = [accum[i] + finals[i] for i in range(36)]
-                accum = [accum[i] + finals[i] for i in range(9)]
+                accum = [accum[i] + finals[i] for i in range(36)]
         avg = [rho / n_shots for rho in accum]
         return avg
+
+    # 实现多进程模拟，加快运算
+    def simulate_ensemble_2(self,
+                        pulses: np.ndarray,
+                        n_shots: Optional[int] = None,
+                        seed: Optional[int] = None,
+                        n_processes: Optional[int] = None) -> List[qt.Qobj]:
+        if n_shots is None:
+            n_shots = self.n_shots
+        
+        # Pre-generate all random detunings with the same seed
+        rng = np.random.RandomState(seed)
+        detunings = [(rng.normal(0.0, self.sigma_detune_q1),
+                    rng.normal(0.0, self.sigma_detune_q2))
+                    for _ in range(n_shots)]
+        
+        # Prepare arguments for parallel execution
+        args_list = [(self, pulses, d1, d2) for d1, d2 in detunings]
+        
+        # Run parallel simulations
+        with Pool(processes=n_processes) as pool:
+            all_finals = pool.map(worker_shot, args_list)
+        
+        # Average results
+        accum = all_finals[0]
+        for finals in all_finals[1:]:
+            accum = [accum[i] + finals[i] for i in range(36)]
+        
+        return [rho / n_shots for rho in accum]
+
+
 
     # ---------- Metrics ----------
 
@@ -360,7 +418,22 @@ class DispersiveCNOTPulseGrader:
         """
         Compute gate error ε_g using 36 input states with ensemble averaging
         """
-        avg_states = self.simulate_ensemble(pulses, n_shots, seed)
+        # time_1 = time.time()
+        # avg_states = self.simulate_ensemble(pulses, n_shots, seed)
+        # time_1 = time.time() - time_1
+        # print(f"simulate_ensemble time: {time_1}")
+
+        # time_2 = time.time()
+        # avg_states_2 = self.simulate_ensemble_2(pulses, n_shots, seed)
+        # time_2 = time.time() - time_2
+        # print(f"simulate_ensemble_2 time: {time_2}")        
+
+        # # 确认输出一致
+        # compare_density_matrices(avg_states, avg_states_2)
+
+
+        avg_states = self.simulate_ensemble_2(pulses, n_shots, seed)
+
 
         # Build same 36 inputs
         b0 = qt.basis(self.nq, 0)
@@ -373,8 +446,7 @@ class DispersiveCNOTPulseGrader:
         inputs = [qt.tensor(s1, s2) for s1 in sq for s2 in sq]
 
         fidelities = []
-        # for i in range(36):
-        for i in range(9):
+        for i in range(36):
             rho = avg_states[i]
             rho_corr = self.U_target.dag() * rho * self.U_target
             F_i = qt.expect(qt.ket2dm(inputs[i]), rho_corr)
@@ -384,6 +456,31 @@ class DispersiveCNOTPulseGrader:
         eps_g = 1.0 - F_avg
         return eps_g, fidelities
 
+
+    def gate_error_2(self, avg_states) -> Tuple[float, List[float]]:
+        # Build same 36 inputs
+        b0 = qt.basis(self.nq, 0)
+        b1 = qt.basis(self.nq, 1)
+        plus = (b0 + b1).unit()
+        minus = (b0 - b1).unit()
+        plus_i = (b0 + 1j * b1).unit()
+        minus_i = (b0 - 1j * b1).unit()
+        sq = [b0, b1, plus, minus, plus_i, minus_i]
+        inputs = [qt.tensor(s1, s2) for s1 in sq for s2 in sq]
+
+        fidelities = []
+        for i in range(36):
+            rho = avg_states[i]
+            rho_corr = self.U_target.dag() * rho * self.U_target
+            F_i = qt.expect(qt.ket2dm(inputs[i]), rho_corr)
+            fidelities.append(float(np.real(F_i)))
+
+        F_avg = float(np.mean(fidelities))
+        eps_g = 1.0 - F_avg
+        return eps_g, fidelities
+
+
+
     def leakage(self,
                 pulses: np.ndarray,
                 n_shots: Optional[int] = None,
@@ -391,7 +488,15 @@ class DispersiveCNOTPulseGrader:
         """
         Compute leakage L from computational subspace with ensemble averaging
         """
-        avg_states = self.simulate_ensemble(pulses, n_shots, seed)
+        # avg_states = self.simulate_ensemble(pulses, n_shots, seed)
+        avg_states = self.simulate_ensemble_2(pulses, n_shots, seed)
+        leaks = []
+        for rho in avg_states:
+            pop_comp = np.real((self.P_comp * rho).tr())
+            leaks.append(float(1.0 - pop_comp))
+        return float(np.mean(leaks)), leaks
+
+    def leakage_2(self, avg_states) -> Tuple[float, List[float]]:
         leaks = []
         for rho in avg_states:
             pop_comp = np.real((self.P_comp * rho).tr())
@@ -444,9 +549,19 @@ class DispersiveCNOTPulseGrader:
         if verbose:
             print(f"\nSimulating with {n_shots} shots for ensemble averaging...")
 
-        # Compute metrics
-        epsilon_g, individual_fidelities = self.gate_error(pulses, n_shots, seed)
-        leakage, individual_leakages = self.leakage(pulses, n_shots, seed)
+        
+        # # Compute metrics
+        # epsilon_g, individual_fidelities = self.gate_error(pulses, n_shots, seed)
+        # leakage, individual_leakages = self.leakage(pulses, n_shots, seed)
+
+
+        # time_5 = time.time()
+        avg_states = self.simulate_ensemble_2(pulses, n_shots, seed)
+        epsilon_g, individual_fidelities = self.gate_error_2(avg_states)
+        leakage, individual_leakages = self.leakage_2(avg_states)
+        # time_5 = time.time() - time_5
+        # print(f"error time: {time_5}")
+        
         P_a = self.amplitude_penalty(pulses)
         P_d = self.derivative_penalty(pulses)
 

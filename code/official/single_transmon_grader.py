@@ -3,7 +3,14 @@ import qutip as qt
 from scipy.interpolate import interp1d
 from typing import Dict, Tuple, List
 import json
+import time
+from multiprocessing import Pool
 
+
+# 定义工作函数, 用于并行计算
+def worker(args):
+    self, pulses, phi, psi_i, n_shots, seed = args
+    return self.simulate_evolution_ensemble(pulses, phi, psi_i, n_shots, seed)
 
 class TransmonPulseGrader:
     """
@@ -312,7 +319,28 @@ class TransmonPulseGrader:
         # rho_avg = rho_avg / trace
         
         return rho_avg
-    
+
+
+    def evolution(self, pulses: np.ndarray, phi: float, n_shots: int = None,
+                                   seed: int = None) -> List[qt.Qobj]:
+        """
+        计算所有 cardinal states 的演化结果（多进程优化）
+        
+        优化点：将6次串行计算改为并行计算
+        """
+        if n_shots is None:
+            n_shots = self.n_shots
+
+        # 准备参数
+        params = [(self, pulses, phi, psi_i, n_shots, seed) for psi_i in self.cardinal_states]
+        
+        
+        # 使用多进程并行计算
+        with Pool() as pool:
+            rho_final_avgs = pool.map(worker, params)
+        
+        return rho_final_avgs
+
     def compute_gate_error(self, pulses: np.ndarray, phi: float = 0.0,
                           n_shots: int = None, seed: int = None) -> Tuple[float, List[float]]:
         """
@@ -370,6 +398,44 @@ class TransmonPulseGrader:
             # Compute fidelity: ⟨ψ_i| ρ_corrected |ψ_i⟩
             fidelity = qt.expect(qt.ket2dm(psi_i), rho_corrected)
             fidelities.append(np.real(fidelity))
+
+        # Average fidelity
+        avg_fidelity = np.mean(fidelities)
+        
+        # Gate error
+        epsilon_g = 1.0 - avg_fidelity
+        
+        return epsilon_g, fidelities
+
+
+    def compute_gate_error_2(self, rho_final_avg_list) -> Tuple[float, List[float]]:
+
+
+        # Create target gate operator (2×2)
+        R_x = self.target_gate_2x2
+        R_x_dag = R_x.conj().T
+        
+        # Embed in full Hilbert space
+        R_x_full_np = np.eye(self.n_levels, dtype=complex)
+        R_x_full_np[:2, :2] = R_x
+        R_x_full = qt.Qobj(R_x_full_np)
+        
+        R_x_dag_full_np = np.eye(self.n_levels, dtype=complex)
+        R_x_dag_full_np[:2, :2] = R_x_dag
+        R_x_dag_full = qt.Qobj(R_x_dag_full_np)
+        
+        fidelities = []
+
+        for i in range(len(self.cardinal_states)):
+            psi_i = self.cardinal_states[i]
+            rho_final_avg = rho_final_avg_list[i]
+
+            # Apply gate correction: R_X† ⟨ρ⟩ R_X
+            rho_corrected = R_x_dag_full * rho_final_avg * R_x_full
+            
+            # Compute fidelity: ⟨ψ_i| ρ_corrected |ψ_i⟩
+            fidelity = qt.expect(qt.ket2dm(psi_i), rho_corrected)
+            fidelities.append(np.real(fidelity))
         
         # Average fidelity
         avg_fidelity = np.mean(fidelities)
@@ -378,7 +444,7 @@ class TransmonPulseGrader:
         epsilon_g = 1.0 - avg_fidelity
         
         return epsilon_g, fidelities
-    
+
     def compute_leakage(self, pulses: np.ndarray, phi: float = 0.0,
                        n_shots: int = None, seed: int = None) -> Tuple[float, List[float]]:
         """
@@ -428,12 +494,38 @@ class TransmonPulseGrader:
             # Leakage = 1 - (pop_0 + pop_1)
             leakage_i = 1.0 - pop_0 - pop_1
             leakages.append(leakage_i)
-        
         # Average leakage
         avg_leakage = np.mean(leakages)
         
         return avg_leakage, leakages
     
+
+    def compute_leakage_2(self, rho_final_avg_list) -> Tuple[float, List[float]]:
+
+        # Projectors
+        proj_0 = qt.ket2dm(qt.basis(self.n_levels, 0))
+        proj_1 = qt.ket2dm(qt.basis(self.n_levels, 1))
+        
+        leakages = []
+        
+        for i in range(len(self.cardinal_states)):
+            rho_final_avg = rho_final_avg_list[i]
+            
+            # Population in computational subspace
+            pop_0 = np.real((proj_0 * rho_final_avg).tr())
+            pop_1 = np.real((proj_1 * rho_final_avg).tr())
+            
+            # Leakage = 1 - (pop_0 + pop_1)
+            leakage_i = 1.0 - pop_0 - pop_1
+            leakages.append(leakage_i)
+
+
+        # Average leakage
+        avg_leakage = np.mean(leakages)
+        
+        return avg_leakage, leakages
+
+
     def compute_amplitude_penalty(self, pulses: np.ndarray) -> float:
         """
         Compute amplitude penalty P_a
@@ -535,11 +627,25 @@ class TransmonPulseGrader:
             print(f"\nSimulating with {n_shots} shots for ensemble averaging...")
         
         # 1. Gate error (primary metric) - with ensemble averaging
-        epsilon_g, fidelities = self.compute_gate_error(pulses, phi, n_shots, seed)
+        # time_1 = time.time()
+        # epsilon_g, fidelities = self.compute_gate_error(pulses, phi, n_shots, seed)
+        # time_1 = time.time() - time_1
+        # print(f"gate_error time: {time_1}")
         
         # 2. Leakage (secondary metric) - with ensemble averaging
-        leakage, individual_leakages = self.compute_leakage(pulses, phi, n_shots, seed)
+        # time_2 = time.time()
+        # leakage, individual_leakages = self.compute_leakage(pulses, phi, n_shots, seed)
+        # time_2 = time.time() - time_2
+        # print(f"leakage time: {time_2}")
+
+        # time_3 = time.time()
+        rho_final_avg_list = self.evolution(pulses, phi, n_shots, seed)
+        epsilon_g, fidelities = self.compute_gate_error_2(rho_final_avg_list)
+        leakage, individual_leakages = self.compute_leakage_2(rho_final_avg_list)
+        # time_3 = time.time() - time_3
+        # print(f"error time: {time_3}")
         
+
         # 3. Amplitude penalty
         P_a = self.compute_amplitude_penalty(pulses)
         

@@ -10,6 +10,8 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'official'))
 from two_transmon_grader import DispersiveCNOTPulseGrader
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="qutip")
 
 def gaussian_envelope(n_steps: int, sigma_frac: float = 0.2) -> np.ndarray:
     """
@@ -230,13 +232,15 @@ class CNOTPulseOptimizer:
         """
         print("计算初始分数...")
         init_time = time.time()
+
+        print(f"初始化方法: {init_method}")
         
         if init_method == "gaussian":
             # 构建初始脉冲（高斯面积匹配）
             pulses_init = build_area_matched_gaussian(self.n_steps, self.dt, target_angle=np.pi)
             a = 0.15
             c = 0.10
-        else:
+        elif init_method == "random":
             # 构建初始脉冲（随机）
             pulses_init = self.rng.uniform(-1.0, 1.0, size=(self.n_steps, 2)) * self.Amax
             a = 0.20
@@ -278,6 +282,20 @@ class CNOTPulseOptimizer:
         return pulses_best, final_results
 
 
+# 定义评分函数，方便多进程调用，及结果对比
+def evaluate_pulse(args):
+    pulse_data, verbose = args
+    # 为每个进程创建独立的评分器实例
+    local_grader = DispersiveCNOTPulseGrader(
+    nq_levels=3,
+    n_steps=300,
+    dt=5e-10,
+    n_shots=10
+    )
+    results = local_grader.grade_submission(pulse_data, n_shots=10, verbose=verbose)
+    return results['overall_score'], results['gate_error'], results["gate_fidelity"],results['leakage_score'], results['penalty_score']
+
+
 if __name__ == "__main__":
     # 初始化官方评分器（双比特CNOT）
     grader = DispersiveCNOTPulseGrader(
@@ -311,6 +329,6 @@ if __name__ == "__main__":
     pulses_best, results = optimizer.run(
         iters=200,
         shots=10,
-        seeds=[42, 123],
+        seeds=[42],
         init_method="gaussian"
     )

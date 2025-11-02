@@ -6,6 +6,8 @@ import json
 import time
 from multiprocessing import Pool
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="qutip")
 
 # 定义工作函数, 用于并行计算
 def worker(args):
@@ -35,7 +37,9 @@ class TransmonPulseGrader:
                  n_shots: int = 15,  # Number of shots for averaging
                  h_a: float = 179e6,  # Amplitude threshold (Hz)
                  h_d: float = 22.4e6,  # Derivative threshold (Hz)
-                 A_penalty: float = 0.1):  # Penalty scaling factor
+                 A_penalty: float = 0.1,  # Penalty scaling factor
+                 computing_method: str = 'serial' # 'parallel' or 'serial' 计算损失值时使用串行或并行方法，默认是串行
+                 ):  # Penalty scaling factor
         """
         Parameters:
         -----------
@@ -69,6 +73,11 @@ class TransmonPulseGrader:
         A_penalty : float
             Penalty scaling factor
         """
+        
+        # 计算损失值时使用的方法，默认是串行运算    
+        self.computing_method = computing_method
+
+
         self.n_levels = n_levels
         self.n_steps = n_steps  # Store expected number of steps
         self.alpha = alpha
@@ -626,24 +635,20 @@ class TransmonPulseGrader:
         if verbose:
             print(f"\nSimulating with {n_shots} shots for ensemble averaging...")
         
-        # 1. Gate error (primary metric) - with ensemble averaging
-        # time_1 = time.time()
-        # epsilon_g, fidelities = self.compute_gate_error(pulses, phi, n_shots, seed)
-        # time_1 = time.time() - time_1
-        # print(f"gate_error time: {time_1}")
-        
-        # 2. Leakage (secondary metric) - with ensemble averaging
-        # time_2 = time.time()
-        # leakage, individual_leakages = self.compute_leakage(pulses, phi, n_shots, seed)
-        # time_2 = time.time() - time_2
-        # print(f"leakage time: {time_2}")
+        # 串行运算
+        if self.computing_method == 'serial':
+            # 1. Gate error (primary metric) - with ensemble averaging
+            epsilon_g, fidelities = self.compute_gate_error(pulses, phi, n_shots, seed)
 
-        # time_3 = time.time()
-        rho_final_avg_list = self.evolution(pulses, phi, n_shots, seed)
-        epsilon_g, fidelities = self.compute_gate_error_2(rho_final_avg_list)
-        leakage, individual_leakages = self.compute_leakage_2(rho_final_avg_list)
-        # time_3 = time.time() - time_3
-        # print(f"error time: {time_3}")
+            # 2. Leakage (secondary metric) - with ensemble averaging
+            leakage, individual_leakages = self.compute_leakage(pulses, phi, n_shots, seed)
+
+        elif self.computing_method == 'parallel':
+            # 并行运算
+            rho_final_avg_list = self.evolution(pulses, phi, n_shots, seed)
+            epsilon_g, fidelities = self.compute_gate_error_2(rho_final_avg_list)
+            leakage, individual_leakages = self.compute_leakage_2(rho_final_avg_list)
+
         
 
         # 3. Amplitude penalty

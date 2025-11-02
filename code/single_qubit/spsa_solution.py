@@ -7,6 +7,8 @@ import json
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'official'))
+
+# 对原始评分器进行了优化，可以使用多进程并行计算
 from single_transmon_grader import TransmonPulseGrader
 
 import warnings
@@ -72,7 +74,7 @@ class RobustOpenSystemSPSA:
 
     def __init__(
         self,
-        grader: TransmonPulseGrader,
+        grader: TransmonPulseGrader(computing_method = 'parallel'), # 评分器采用并行计算
         n_steps: int = 30,
         dt: float = 5e-10,
         K: int = 10,
@@ -244,8 +246,8 @@ class RobustOpenSystemSPSA:
         elif init_method == "random":
             # 构建初始脉冲（随机）
             pulses_init = self.rng.uniform(-1.0, 1.0, size=(self.n_steps, 2))
-            a=0.1
-            c=0.1
+            a=0.05
+            c=0.04
         else:
             raise ValueError(f"未知的初始脉冲构建方法: {init_method}")
 
@@ -264,6 +266,9 @@ class RobustOpenSystemSPSA:
 
         # 输出当前最优的脉冲
         pulses_best, phi_best = self.vec_to_pulses_phi(x_best)
+        final_score = self.evaluate_score(pulses_best, phi_best, seeds=seeds, n_shots=shots)
+        print(f"当前最优的脉冲: best_score={final_score:.6f}")
+
 
         # 将初始分数 init_score 存到 iter_hist 中，且不影响其他值
         iter_hist.append({
@@ -283,16 +288,17 @@ class RobustOpenSystemSPSA:
 
 
 # 定义评分函数，方便多进程调用，及结果对比
-def evaluate_pulse(args):
-    pulse_data, phi, verbose = args
-    # 为每个进程创建独立的评分器实例
+def evaluate_pulse(args, computing_method='serial'):
+    pulse_data, phi, shot = args
+    # 为每个进程创建独立的评分器实例，使用官方的评分器
     local_grader = TransmonPulseGrader(
         n_levels=4,
         n_steps=30,
         dt=5e-10,
-        n_shots=15
+        n_shots=shot,
+        computing_method=computing_method
     )
-    results = local_grader.grade_submission(pulse_data, phi, verbose=verbose)
+    results = local_grader.grade_submission(pulse_data, phi, verbose=False)
     return results['overall_score'], results['gate_error'], results["gate_fidelity"],results['leakage_score'], results['penalty_score']
 
 
@@ -312,7 +318,8 @@ if __name__ == "__main__":
         n_shots=15,        # 默认评分shots
         h_a=179e6,
         h_d=22.4e6,
-        A_penalty=0.1
+        A_penalty=0.1,
+        computing_method='parallel' # 评分采用并行计算
     )
 
     optimizer = RobustOpenSystemSPSA(
@@ -327,13 +334,13 @@ if __name__ == "__main__":
     )
 
     pulses_best, phi_best = optimizer.run(
-        iters=100,
+        iters=2000,
         shots=15,
         seeds=[42],
-        init_method="random"
+        init_method="gaussian"
     )
 
     # 输出最终得分
-    print(f"最终得分: {grader.grade_submission(pulses_best, phi_best, verbose=False)['overall_score']:.6f}")
+    print(f"最终得分（官方评分器）: {grader.grade_submission(pulses_best, phi_best, seed=42, verbose=False)['overall_score']:.6f}")
 
 

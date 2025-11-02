@@ -96,6 +96,7 @@ class DispersiveCNOTPulseGrader:
                  A_penalty: float = 0.1,
                  h_a_Hz: float = 200e6,
                  h_d_Hz: float = 2.7e6,
+                 computing_method: str = 'serial'  # 'parallel' or 'serial'
                  ):
         """
         Parameters:
@@ -133,6 +134,11 @@ class DispersiveCNOTPulseGrader:
         h_d_Hz : float
             Derivative threshold in Hz (will be converted to rad/s internally), default 2.7 MHz
         """
+
+        # 计算损失值时使用的方法，默认是串行运算    
+        self.computing_method = computing_method
+
+
         self.nq = nq_levels
         self.n_steps = n_steps
         self.dt = dt
@@ -418,22 +424,7 @@ class DispersiveCNOTPulseGrader:
         """
         Compute gate error ε_g using 36 input states with ensemble averaging
         """
-        # time_1 = time.time()
-        # avg_states = self.simulate_ensemble(pulses, n_shots, seed)
-        # time_1 = time.time() - time_1
-        # print(f"simulate_ensemble time: {time_1}")
-
-        # time_2 = time.time()
-        # avg_states_2 = self.simulate_ensemble_2(pulses, n_shots, seed)
-        # time_2 = time.time() - time_2
-        # print(f"simulate_ensemble_2 time: {time_2}")        
-
-        # # 确认输出一致
-        # compare_density_matrices(avg_states, avg_states_2)
-
-
-        avg_states = self.simulate_ensemble_2(pulses, n_shots, seed)
-
+        avg_states = self.simulate_ensemble(pulses, n_shots, seed)
 
         # Build same 36 inputs
         b0 = qt.basis(self.nq, 0)
@@ -455,6 +446,7 @@ class DispersiveCNOTPulseGrader:
         F_avg = float(np.mean(fidelities))
         eps_g = 1.0 - F_avg
         return eps_g, fidelities
+
 
 
     def gate_error_2(self, avg_states) -> Tuple[float, List[float]]:
@@ -488,8 +480,7 @@ class DispersiveCNOTPulseGrader:
         """
         Compute leakage L from computational subspace with ensemble averaging
         """
-        # avg_states = self.simulate_ensemble(pulses, n_shots, seed)
-        avg_states = self.simulate_ensemble_2(pulses, n_shots, seed)
+        avg_states = self.simulate_ensemble(pulses, n_shots, seed)
         leaks = []
         for rho in avg_states:
             pop_comp = np.real((self.P_comp * rho).tr())
@@ -549,18 +540,15 @@ class DispersiveCNOTPulseGrader:
         if verbose:
             print(f"\nSimulating with {n_shots} shots for ensemble averaging...")
 
-        
-        # # Compute metrics
-        # epsilon_g, individual_fidelities = self.gate_error(pulses, n_shots, seed)
-        # leakage, individual_leakages = self.leakage(pulses, n_shots, seed)
+        if self.computing_method == 'serial':
+            # Compute metrics
+            epsilon_g, individual_fidelities = self.gate_error(pulses, n_shots, seed)
+            leakage, individual_leakages = self.leakage(pulses, n_shots, seed)
 
-
-        # time_5 = time.time()
-        avg_states = self.simulate_ensemble_2(pulses, n_shots, seed)
-        epsilon_g, individual_fidelities = self.gate_error_2(avg_states)
-        leakage, individual_leakages = self.leakage_2(avg_states)
-        # time_5 = time.time() - time_5
-        # print(f"error time: {time_5}")
+        elif self.computing_method == 'parallel':
+            avg_states = self.simulate_ensemble_2(pulses, n_shots, seed)
+            epsilon_g, individual_fidelities = self.gate_error_2(avg_states)
+            leakage, individual_leakages = self.leakage_2(avg_states)
         
         P_a = self.amplitude_penalty(pulses)
         P_d = self.derivative_penalty(pulses)

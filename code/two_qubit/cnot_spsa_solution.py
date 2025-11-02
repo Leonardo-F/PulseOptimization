@@ -8,8 +8,9 @@ import json
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'official'))
-from two_transmon_grader import DispersiveCNOTPulseGrader
 
+# 可采用多进程并行计算，对原始评分器进行了优化
+from two_transmon_grader import DispersiveCNOTPulseGrader
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="qutip")
 
@@ -43,6 +44,47 @@ def build_area_matched_gaussian(n_steps: int, dt: float, target_angle: float = n
     return np.column_stack([I, Q])
 
 
+def build_rectangular_pulse(n_steps: int, dt: float, target_angle: float = np.pi, duty_cycle: float = 0.7, use_q: bool = True) -> np.ndarray:
+    """
+    生成矩形脉冲，基于面积匹配使得 sum(I)*dt ≈ target_angle。
+    
+    参数:
+        n_steps: 脉冲总步数
+        dt: 时间步长
+        target_angle: 目标旋转角度，默认为π
+        duty_cycle: 占空比，0.0-1.0，默认为0.7（脉冲持续时间占总时间的70%）
+        use_q: 是否使用非零的Q路脉冲，默认为True
+    
+    返回:
+        pulses: shape (n_steps, 2), 单位 rad/s
+    """
+    # 创建矩形包络
+    env = np.zeros(n_steps)
+    # 计算脉冲起始和结束位置，使脉冲居中
+    pulse_length = int(n_steps * duty_cycle)
+    start_idx = (n_steps - pulse_length) // 2
+    end_idx = start_idx + pulse_length
+    # 设置矩形脉冲区域的值为1
+    env[start_idx:end_idx] = 1.0
+    
+    # 面积匹配：sum(I)*dt = target_angle
+    area = np.sum(env) * dt
+    if area < 1e-18:
+        raise ValueError("Pulse area too small. Adjust duty_cycle.")
+    amp = target_angle / area  # rad/s
+    
+    I = amp * env
+    
+    if use_q:
+        # 使用非零的Q路脉冲，这里使用较小的振幅，相位差为π/2
+        # 这有助于更好地控制量子系统的相位
+        Q = 0.3 * amp * env  # Q路振幅为I路的30%
+    else:
+        Q = np.zeros_like(I)
+    
+    return np.column_stack([I, Q])
+
+
 def knots_to_pulses(knots: np.ndarray, n_steps: int, smooth_len: int = 5) -> np.ndarray:
     """
     将K个结点线性插值到n_steps步，并进行轻度Hann平滑。
@@ -73,7 +115,7 @@ class CNOTPulseOptimizer:
 
     def __init__(
         self,
-        grader: DispersiveCNOTPulseGrader,
+        grader: DispersiveCNOTPulseGrader(computing_method = 'parallel'), # 评分器采用并行计算
         n_steps: int = 300,
         dt: float = 5e-10,
         K: int = 20,
@@ -149,8 +191,8 @@ class CNOTPulseOptimizer:
         self,
         x0: np.ndarray,
         max_iter: int = 200,
-        a: float = 0.15,
-        c: float = 0.10,
+        a: float = 0.5,
+        c: float = 0.08,
         alpha: float = 0.602,
         gamma: float = 0.101,
         A: float = 10.0,
@@ -238,11 +280,16 @@ class CNOTPulseOptimizer:
         if init_method == "gaussian":
             # 构建初始脉冲（高斯面积匹配）
             pulses_init = build_area_matched_gaussian(self.n_steps, self.dt, target_angle=np.pi)
-            a = 0.15
-            c = 0.10
+            a = 0.20
+            c = 0.12
         elif init_method == "random":
             # 构建初始脉冲（随机）
             pulses_init = self.rng.uniform(-1.0, 1.0, size=(self.n_steps, 2)) * self.Amax
+            a = 0.20
+            c = 0.12
+        elif init_method == "rectangular":
+            # 构建初始脉冲（矩形），使用非零的Q路脉冲以提高初始性能
+            pulses_init = build_rectangular_pulse(self.n_steps, self.dt, target_angle=np.pi, duty_cycle=0.7, use_q=True)
             a = 0.20
             c = 0.12
 
@@ -285,7 +332,7 @@ class CNOTPulseOptimizer:
 # 定义评分函数，方便多进程调用，及结果对比
 def evaluate_pulse(args):
     pulse_data, verbose = args
-    # 为每个进程创建独立的评分器实例
+    # 为每个进程创建独立的评分器实例，使用官方评分器
     local_grader = DispersiveCNOTPulseGrader(
     nq_levels=3,
     n_steps=300,
@@ -313,22 +360,23 @@ if __name__ == "__main__":
         n_shots=10,        # 默认评分shots
         h_a_Hz=200e6,
         h_d_Hz=2.7e6,
-        A_penalty=0.1
+        A_penalty=0.1,
+        computing_method='parallel' # 评分采用并行计算
     )
 
     optimizer = CNOTPulseOptimizer(
         grader=grader,
         n_steps=300,
         dt=5e-10,
-        K=50,              # 20个结点 -> 300步插值
-        Amax_MHz=200.0,    # 幅度上限 2π×200 MHz
-        smooth_len=5,      # 轻度平滑窗口
-        rng_seed=1234
+        K=100,              # 20个结点 -> 300步插值
+        Amax_MHz=150.0,    # 幅度上限 150 MHz
+        smooth_len=3,      # 轻度平滑窗口
+        rng_seed=42
     )
 
     pulses_best, results = optimizer.run(
         iters=200,
-        shots=10,
+        shots=5,
         seeds=[42],
-        init_method="gaussian"
+        init_method="rectangular"
     )

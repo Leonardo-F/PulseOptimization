@@ -334,7 +334,7 @@ if __name__ == "__main__":
     )
 
     pulses_best, phi_best = optimizer.run(
-        iters=2000,
+        iters=4000,
         shots=15,
         seeds=[42],
         init_method="gaussian"

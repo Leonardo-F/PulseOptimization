@@ -5,6 +5,8 @@ from typing import List, Tuple, Optional, Dict
 import json
 from multiprocessing import Pool
 import time
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="qutip")
 
 # 用于多进程模拟
 def worker_shot(args):

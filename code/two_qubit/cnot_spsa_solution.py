@@ -330,16 +330,17 @@ class CNOTPulseOptimizer:
 
 
 # 定义评分函数，方便多进程调用，及结果对比
-def evaluate_pulse(args):
+def evaluate_pulse(args, computing_method='parallel'):
     pulse_data, verbose = args
     # 为每个进程创建独立的评分器实例，使用官方评分器
     local_grader = DispersiveCNOTPulseGrader(
     nq_levels=3,
     n_steps=300,
     dt=5e-10,
-    n_shots=10
+    n_shots=10,
+    computing_method=computing_method
     )
-    results = local_grader.grade_submission(pulse_data, n_shots=10, verbose=verbose)
+    results = local_grader.grade_submission(pulse_data, n_shots=10, seed=None, verbose=verbose)
     return results['overall_score'], results['gate_error'], results["gate_fidelity"],results['leakage_score'], results['penalty_score']
 
 

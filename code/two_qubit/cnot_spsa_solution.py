@@ -292,6 +292,13 @@ class CNOTPulseOptimizer:
             pulses_init = build_rectangular_pulse(self.n_steps, self.dt, target_angle=np.pi, duty_cycle=0.7, use_q=True)
             a = 0.20
             c = 0.12
+        elif init_method == "closed":
+            # 构建初始脉冲（面积匹配），使用非零的Q路脉冲以提高初始性能
+            pulses_init = np.load("/Users/fangaoming/Desktop/GitHub/PulseOptimization/code/two_qubit/results/pulses_closed.npy")
+            a = 0.20
+            c = 0.12
+        else:
+            raise ValueError("Invalid init_method")
 
         x0 = self.pulses_to_init_vec(pulses_init)
         init_score = self.evaluate_score(pulses_init, seeds=[42], n_shots=shots)
@@ -379,5 +386,5 @@ if __name__ == "__main__":
         iters=200,
         shots=5,
         seeds=[42],
-        init_method="rectangular"
+        init_method="closed"
     )

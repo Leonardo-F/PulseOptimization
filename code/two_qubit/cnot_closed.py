@@ -13,6 +13,17 @@ rcParams['axes.unicode_minus'] = False
 # 启用64位精度
 jax.config.update("jax_enable_x64", True)
 
+
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'official'))
+
+# 可采用多进程并行计算，对原始评分器进行了优化
+from two_transmon_grader import DispersiveCNOTPulseGrader
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="qutip")
+
+
 class TwoQubitGRAPE:
     """
     两比特系统GRAPE优化（封闭系统）
@@ -171,11 +182,106 @@ class TwoQubitGRAPE:
         return jnp.mean(fidelities)
     
     @partial(jit, static_argnums=(0,))
+    def derivative_penalty(self, pulses):
+        """计算导数惩罚项，与官方评分器保持一致"""
+        N = self.n_steps
+        pen = 0.0
+        h_d = 2 * jnp.pi * 2.7e6  # 2.7 MHz in rad/s
+        A_penalty = 0.1
+        
+        for j in range(N - 1):
+            for k in range(2):  # Only 2 channels now
+                diff = pulses[j + 1, k] - pulses[j, k]
+                r2 = (diff / h_d) ** 2
+                pen += jnp.exp(jnp.minimum(r2, 50.0)) - 1.0
+        return A_penalty * pen / N
+    
+    @partial(jit, static_argnums=(0,))
+    def amplitude_penalty(self, pulses):
+        """计算幅度惩罚项，与官方评分器保持一致"""
+        N = self.n_steps
+        pen = 0.0
+        h_a = 2 * jnp.pi * 200e6  # 200 MHz in rad/s
+        A_penalty = 0.1
+        
+        for j in range(N):
+            for k in range(2):  # Only 2 channels now
+                r2 = (pulses[j, k] / h_a) ** 2
+                pen += jnp.exp(jnp.minimum(r2, 50.0)) - 1.0
+        return A_penalty * pen / N
+    
+    @partial(jit, static_argnums=(0,))
+    def compute_leakage(self, pulses, initial_states):
+        """
+        计算从计算子空间的泄漏
+        
+        计算子空间：{|00⟩, |01⟩, |10⟩, |11⟩}
+        """
+        # 计算每个初态的演化终态
+        def evolve_single(psi0):
+            final_state, _ = self.forward_propagation(pulses, psi0)
+            return final_state
+        
+        final_states = jax.vmap(evolve_single)(initial_states)
+        
+        # 计算子空间的投影算符
+        dim = self.nq ** 2
+        
+        # 计算子空间基态的索引
+        # |00⟩ -> 0, |01⟩ -> 1, |10⟩ -> nq, |11⟩ -> nq+1
+        comp_indices = jnp.array([0, 1, self.nq, self.nq + 1])
+        
+        # 计算每个终态的泄漏
+        def compute_leakage_single(final_state):
+            # 计算在计算子空间的布居数
+            pop_comp = 0.0
+            for idx in comp_indices:
+                pop_comp += jnp.abs(final_state[idx])**2
+            # 泄漏 = 1 - 计算子空间布居数
+            return 1.0 - pop_comp
+        
+        # 对所有初态计算泄漏并平均
+        leakages = jax.vmap(compute_leakage_single)(final_states)
+        return jnp.mean(leakages)
+
+    @partial(jit, static_argnums=(0,))
     def cost_function(self, params_flat, initial_states):
-        """优化的成本函数"""
+        """
+        完整的成本函数，包含所有评分标准
+        
+        根据官方评分标准：
+        - 门保真度 (80%权重)
+        - 泄漏抑制 (15%权重)
+        - 脉冲质量约束 (5%权重)，包括幅度惩罚和导数惩罚
+        """
         pulses = params_flat.reshape((self.n_steps, 2))
-        fid = self.gate_fidelity(pulses, initial_states)
-        return -fid * 1e8  # 放大以改善数值条件 
+        
+        # 1. 门保真度 (80%权重)
+        gate_fidelity = self.gate_fidelity(pulses, initial_states)
+        gate_error = 1.0 - gate_fidelity
+        
+        # 2. 泄漏抑制 (15%权重)
+        leakage = self.compute_leakage(pulses, initial_states)
+        leakage_score = jnp.maximum(0.0, 1.0 - leakage * 5.0)
+        
+        # 3. 脉冲质量约束 (5%权重)
+        amp_pen = self.amplitude_penalty(pulses)
+        der_pen = self.derivative_penalty(pulses)
+        total_penalty = amp_pen + der_pen
+        penalty_score = jnp.maximum(0.0, 1.0 - total_penalty)
+        
+        # 综合得分 (越高越好)
+        overall_score = (
+            0.80 * gate_fidelity +
+            0.15 * leakage_score +
+            0.05 * penalty_score
+        )
+        
+        # 转换为最小化问题 (成本越低越好)
+        cost = 1.0 - overall_score
+        
+        # 放大以改善数值条件
+        return cost * 1e6
     
     def optimize(self, initial_pulses, initial_states, maxiter=200, disp=True):
         """
@@ -196,9 +302,33 @@ class TwoQubitGRAPE:
             gradient = grad_fn(params_jax, initial_states)
             
             if self.iteration % 10 == 0 and disp:
-                fid = -float(cost) / 1e8
+                pulses = params_jax.reshape((self.n_steps, 2))
+                
+                # 计算所有评分标准
+                gate_fidelity = self.gate_fidelity(pulses, initial_states)
+                gate_error = 1.0 - gate_fidelity
+                
+                leakage = self.compute_leakage(pulses, initial_states)
+                leakage_score = float(jnp.maximum(0.0, 1.0 - leakage * 5.0))
+                
+                amp_pen = self.amplitude_penalty(pulses)
+                der_pen = self.derivative_penalty(pulses)
+                total_penalty = amp_pen + der_pen
+                penalty_score = float(jnp.maximum(0.0, 1.0 - total_penalty))
+                
+                overall_score = (
+                    0.80 * gate_fidelity +
+                    0.15 * leakage_score +
+                    0.05 * penalty_score
+                )
+                
                 grad_norm = float(jnp.linalg.norm(gradient))
-                print(f"Iter {self.iteration}: Fidelity = {fid:.6f}, |∇| = {grad_norm:.2e}")
+                
+                print(f"Iter {self.iteration}:")
+                print(f"  Gate Fidelity: {gate_fidelity:.6f} (Error: {gate_error:.6f})")
+                print(f"  Leakage: {leakage:.6f} (Score: {leakage_score:.6f})")
+                print(f"  Penalties: Amp={amp_pen:.6f}, Der={der_pen:.6f}, Total={total_penalty:.6f} (Score: {penalty_score:.6f})")
+                print(f"  Overall Score: {overall_score:.6f}, |∇| = {grad_norm:.2e}")
             
             self.iteration += 1
             return float(cost), np.array(gradient, dtype=np.float64)
@@ -209,11 +339,39 @@ class TwoQubitGRAPE:
             x0,
             method='L-BFGS-B',
             jac=True,
-            options={'maxiter': maxiter, 'ftol': 1e-9, 'gtol': 1e-6}
+            options={'maxiter': maxiter, 'ftol': 1e-12, 'gtol': 1e-12}
         )
         
         result.pulses = result.x.reshape((self.n_steps, 2))
-        result.fidelity = -result.fun / 1e8
+        
+        # 计算所有评分标准
+        gate_fidelity = self.gate_fidelity(result.pulses, initial_states)
+        gate_error = 1.0 - gate_fidelity
+        
+        leakage = self.compute_leakage(result.pulses, initial_states)
+        leakage_score = float(jnp.maximum(0.0, 1.0 - leakage * 5.0))
+        
+        amp_pen = self.amplitude_penalty(result.pulses)
+        der_pen = self.derivative_penalty(result.pulses)
+        total_penalty = amp_pen + der_pen
+        penalty_score = float(jnp.maximum(0.0, 1.0 - total_penalty))
+        
+        overall_score = (
+            0.80 * gate_fidelity +
+            0.15 * leakage_score +
+            0.05 * penalty_score
+        )
+        
+        # 添加所有评分标准到结果对象
+        result.gate_fidelity = float(gate_fidelity)
+        result.gate_error = float(gate_error)
+        result.leakage = float(leakage)
+        result.leakage_score = float(leakage_score)
+        result.amplitude_penalty = float(amp_pen)
+        result.derivative_penalty = float(der_pen)
+        result.total_penalty = float(total_penalty)
+        result.penalty_score = float(penalty_score)
+        result.overall_score = float(overall_score)
         
         return result
 
@@ -251,7 +409,7 @@ if __name__ == "__main__":
     
     # 系统参数（题目给定）
     nq_levels = 3
-    two_pi = 2 * np.pi
+    two_pi = 2 * jnp.pi
     omega1 = two_pi * 4.380e9   # 4.380 GHz
     omega2 = two_pi * 4.614e9   # 4.614 GHz
     omega_d = two_pi * 4.498e9  # 4.498 GHz
@@ -283,11 +441,84 @@ if __name__ == "__main__":
     print(f"\n初态数量: {len(initial_states)}")
     
     # 初始脉冲猜测
-    # 策略：从零开始，让优化器自己找到解
+    # 策略：使用自然的余弦函数叠加，创建美观的初始脉冲
     initial_pulses = np.zeros((n_steps, 2))
-    # 添加小的随机扰动避免局部极小
-    initial_pulses += np.random.randn(n_steps, 2) * two_pi * 1e6  # ~MHz量级
-    initial_pulses = jnp.array(initial_pulses)
+    
+    # 时间轴（归一化到[0, 2π]）
+    t = np.linspace(0, 2*np.pi, n_steps)
+    
+    # 创建自然的余弦函数叠加
+    def natural_cosine_pulse(t):
+        """生成自然的余弦函数叠加，不进行截断"""
+        result = np.zeros_like(t)
+        
+        # 基频余弦函数
+        result += 1.0 * np.cos(t)
+        
+        # 二次谐波，创建更复杂的波形
+        result += 0.5 * np.cos(2*t)
+        
+        # 三次谐波，增加细节
+        result += 0.3 * np.cos(3*t)
+        
+        # 四次谐波，微调波形
+        result += 0.2 * np.cos(4*t)
+        
+        # 五次谐波，增加平滑度
+        result += 0.1 * np.cos(5*t)
+        
+        return result
+    
+    # 实部：使用自然余弦函数
+    envelope_re = natural_cosine_pulse(t)
+    # 归一化并设置幅度
+    envelope_re = envelope_re / np.max(np.abs(envelope_re))
+    initial_pulses[:, 0] = envelope_re * two_pi * 50e6  # 50 MHz幅度
+    
+    # 虚部：使用不同相位的自然余弦函数
+    def natural_cosine_pulse_im(t):
+        """生成具有相位偏移的自然余弦函数"""
+        result = np.zeros_like(t)
+        
+        # 基频余弦函数，带相位偏移
+        result += 1.0 * np.cos(t + np.pi/4)
+        
+        # 二次谐波，不同的相位偏移
+        result += 0.5 * np.cos(2*t + np.pi/6)
+        
+        # 三次谐波，不同的相位偏移
+        result += 0.3 * np.cos(3*t + np.pi/3)
+        
+        return result
+    
+    envelope_im = natural_cosine_pulse_im(t)
+    # 归一化并设置较小幅度
+    envelope_im = envelope_im / np.max(np.abs(envelope_im))
+    initial_pulses[:, 1] = envelope_im * two_pi * 50e6  # 50 MHz幅度
+    
+    # 绘制初始脉冲的波形
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    time_ns = np.arange(n_steps + 1) * dt * 1e9
+    
+    ax1.step(time_ns, 
+             np.append(initial_pulses[:, 0], initial_pulses[-1, 0]) / (two_pi * 1e6),
+             where='post', linewidth=2, color='blue', label='Ω_re')
+    ax1.set_ylabel('Ω_re / 2π (MHz)', fontsize=12)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    ax2.step(time_ns,
+             np.append(initial_pulses[:, 1], initial_pulses[-1, 1]) / (two_pi * 1e6),
+             where='post', linewidth=2, color='red', label='Ω_im')
+    ax2.set_ylabel('Ω_im / 2π (MHz)', fontsize=12)
+    ax2.set_xlabel('Time (ns)', fontsize=12)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    fig.suptitle('初始脉冲波形（自然余弦函数叠加）', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig('initial_pulses_visualization.png', dpi=150)
+    print("初始脉冲可视化已保存到: initial_pulses_visualization.png")
     
     print("\n开始GRAPE优化...")
     print("(这可能需要几分钟时间)\n")
@@ -295,15 +526,36 @@ if __name__ == "__main__":
     result = grape.optimize(
         initial_pulses,
         initial_states,
-        maxiter=500,
+        maxiter=5000,
         disp=True
     )
     
     print("\n" + "="*70)
     print("优化结果（封闭系统）")
     print("="*70)
-    print(f"最终保真度: {result.fidelity:.8f}")
-    # print(f"不保真度: {1-result.fidelity:.2e}")
+    
+    # 计算所有评分标准
+    gate_fidelity = grape.gate_fidelity(result.pulses, initial_states)
+    gate_error = 1.0 - gate_fidelity
+    
+    leakage = grape.compute_leakage(result.pulses, initial_states)
+    leakage_score = float(jnp.maximum(0.0, 1.0 - leakage * 5.0))
+    
+    amp_pen = grape.amplitude_penalty(result.pulses)
+    der_pen = grape.derivative_penalty(result.pulses)
+    total_penalty = amp_pen + der_pen
+    penalty_score = float(jnp.maximum(0.0, 1.0 - total_penalty))
+    
+    overall_score = (
+        0.80 * gate_fidelity +
+        0.15 * leakage_score +
+        0.05 * penalty_score
+    )
+    
+    print(f"门保真度: {gate_fidelity:.6f} (误差: {gate_error:.6f})")
+    print(f"泄漏: {leakage:.6f} (得分: {leakage_score:.6f})")
+    print(f"惩罚项: 幅度={amp_pen:.6f}, 导数={der_pen:.6f}, 总计={total_penalty:.6f} (得分: {penalty_score:.6f})")
+    print(f"综合得分: {overall_score:.6f} ({overall_score*100:.2f}%)")
     print(f"迭代次数: {result.nit}")
     print(f"收敛状态: {result.success}")
     
@@ -330,7 +582,7 @@ if __name__ == "__main__":
     ax2.grid(True, alpha=0.3)
     ax2.legend()
     
-    fig.suptitle(f'优化的CNOT脉冲（封闭系统，F={result.fidelity:.6f}）', 
+    fig.suptitle(f'优化的CNOT脉冲（封闭系统，F={result.gate_fidelity:.6f}）', 
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.savefig('pulses_closed_visualization.png', dpi=150)
@@ -340,3 +592,27 @@ if __name__ == "__main__":
     print("第一阶段完成！")
     print("下一步：将此脉冲作为初值，在开放系统中进行鲁棒性优化")
     print("="*70)
+
+
+    # 看一下在开放系统上的分数
+    # 初始化官方评分器
+    grader = DispersiveCNOTPulseGrader(
+        nq_levels=3,
+        n_steps=300,
+        dt=5e-10,          # 0.5 ns
+        T1_q1=50e-6,
+        T1_q2=50e-6,
+        Tphi_q1=30e-6,
+        Tphi_q2=30e-6,
+        nbar_q1=0.0,
+        nbar_q2=0.0,
+        sigma_detune_q1_Hz=0.5e6,  # 0.5 MHz
+        sigma_detune_q2_Hz=0.5e6,  # 0.5 MHz
+        n_shots=10,        # 默认评分shots
+        h_a_Hz=200e6,
+        h_d_Hz=2.7e6,
+        A_penalty=0.1,
+        computing_method='parallel' # 评分采用并行计算
+    )
+
+    grader.grade_submission(result.pulses, n_shots=10, seed=42, verbose=True)

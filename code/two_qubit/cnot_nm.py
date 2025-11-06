@@ -37,6 +37,7 @@ class OpenSystemCNOTOptimizer:
         cost = 1.0 - score
         gate_fidelity = results['gate_fidelity']
         leakage = results['leakage']
+        penalty = results['total_penalty']
 
         time_1 = time.time() - time_1
 
@@ -46,7 +47,7 @@ class OpenSystemCNOTOptimizer:
             # 保存脉冲
             np.save("pulses_nm.npy", best_pulses)
 
-        print(f"[Nelder-Mead] iter={self.iteration:4d} score={score:.6f} best={self.best_score:.6f} Cost: {cost:.6f} Gate fidelity: {gate_fidelity:.6f} Leakage: {leakage:.6f} iter_time={time_1:.2f}s")
+        print(f"[Nelder-Mead] iter={self.iteration:4d} score={score:.6f} penalty={penalty:.6f} best={self.best_score:.6f} Cost: {cost:.6f} Gate fidelity: {gate_fidelity:.6f} Leakage: {leakage:.6f} iter_time={time_1:.2f}s")
         
 
         self.iteration += 1

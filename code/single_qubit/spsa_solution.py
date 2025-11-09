@@ -1,48 +1,77 @@
-import os
 import time
 import numpy as np
 from typing import List, Tuple
 import json
 
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'official'))
+import matplotlib.pyplot as plt
+# 设置中文字体支持
+from matplotlib import rcParams
+rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+rcParams['axes.unicode_minus'] = False
+
+# 去除警告
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="qutip")
 
 # 对原始评分器进行了优化，可以使用多进程并行计算
 from single_transmon_grader import TransmonPulseGrader
 
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, module="qutip")
 
-def gaussian_envelope(n_steps: int, sigma_frac: float = 0.2) -> np.ndarray:
-    """
-    生成归一化高斯包络（最大值约为1，不做L2/L1归一化），中心在(n_steps-1)/2。
-    sigma_frac: 相对于总步数的标准差比例，0.2~0.25较常用
-    """
-    t = np.arange(n_steps)
-    center = 0.5 * (n_steps - 1)
-    sigma = sigma_frac * n_steps
-    env = np.exp(-0.5 * ((t - center) / sigma) ** 2)
-    return env
+# 生成初始化脉冲
+def generate_initial_pulse(n_steps: int, dt: float, method: str = "gaussian", 
+                          target_angle: float = np.pi/2, seed=42) -> np.ndarray:
+    """    
+    参数:
+        n_steps: 脉冲步数
+        dt: 时间步长
+        method: 脉冲生成方法 ("gaussian", "random")
+        target_angle: 目标旋转角度，gaussian 需要
+        seed: 随机种子，默认为42，用于随机脉冲的生成
 
-
-def build_area_matched_gaussian(n_steps: int, dt: float, target_angle: float = np.pi/2) -> np.ndarray:
+    返回:
+        pulses: shape (n_steps, 2), 单位 rad/s
     """
-    基于面积匹配生成I路高斯初值，使得 sum(I)*dt ≈ target_angle。
-    Q路置零。
-    返回 pulses: shape (n_steps, 2), 单位 rad/s
-    """
-    env = gaussian_envelope(n_steps, sigma_frac=0.22)
-    # 在RWA下 H = (Ω/2) σ_x, 所以Ω T = 目标旋角；此处Ω就是pulses[:,0]本身
-    # 我们用面积匹配： sum(Ω)*dt = target_angle
-    area = np.sum(env) * dt
-    if area < 1e-18:
-        raise ValueError("Envelope area too small.")
-    amp = target_angle / area  # rad/s
-    I = amp * env
-    Q = np.zeros_like(I)
-    return np.column_stack([I, Q])
 
+    if method == "gaussian":
+        def gaussian_envelope(n_steps: int, sigma_frac: float = 0.2) -> np.ndarray:
+            """
+            生成归一化高斯包络（最大值约为1，不做L2/L1归一化），中心在(n_steps-1)/2。
+            sigma_frac: 相对于总步数的标准差比例，0.2~0.25较常用
+            """
+            t = np.arange(n_steps)
+            center = 0.5 * (n_steps - 1)
+            sigma = sigma_frac * n_steps
+            env = np.exp(-0.5 * ((t - center) / sigma) ** 2)
+            return env
+
+        def build_area_matched_gaussian(n_steps: int, dt: float, target_angle: float = np.pi/2) -> np.ndarray:
+            """
+            基于面积匹配生成I路高斯初值，使得 sum(I)*dt ≈ target_angle。
+            Q路置零。
+            返回 pulses: shape (n_steps, 2), 单位 rad/s
+            """
+            env = gaussian_envelope(n_steps, sigma_frac=0.22)
+            # 在RWA下 H = (Ω/2) σ_x, 所以Ω T = 目标旋角；此处Ω就是pulses[:,0]本身
+            # 我们用面积匹配： sum(Ω)*dt = target_angle
+            area = np.sum(env) * dt
+            if area < 1e-18:
+                raise ValueError("Envelope area too small.")
+            amp = target_angle / area  # rad/s
+            I = amp * env
+            Q = np.zeros_like(I)
+            return np.column_stack([I, Q])
+
+        # 生成高斯脉冲
+        pulses = build_area_matched_gaussian(n_steps, dt, target_angle)
+
+    elif method == "random":
+        # 随机脉冲生成        
+        rng = np.random.RandomState(seed)
+        pulses = rng.uniform(-1.0, 1.0, size=(n_steps, 2))
+        # Amax = 2 * np.pi * 179e6  # 默认 179 MHz，幅度阈值
+        # pulses = rng.uniform(-1.0, 1.0, size=(n_steps, 2)) * Amax
+
+    return pulses
 
 def knots_to_pulses(knots: np.ndarray, n_steps: int, smooth_len: int = 5) -> np.ndarray:
     """
@@ -65,7 +94,7 @@ def knots_to_pulses(knots: np.ndarray, n_steps: int, smooth_len: int = 5) -> np.
     return arr
 
 
-class RobustOpenSystemSPSA:
+class OpenSystemSPSA:
     """
     开放系统√X门鲁棒脉冲优化（SPSA + 带限参数化）
     - 变量：I/Q各K个结点 + 相位φ（共2K+1维）
@@ -89,6 +118,7 @@ class RobustOpenSystemSPSA:
         self.smooth_len = smooth_len
         self.rng = np.random.RandomState(rng_seed)
 
+        self.rng_seed = rng_seed
         # 振幅上界（rad/s）
         self.Amax = 2 * np.pi * Amax_MHz * 1e6
 
@@ -162,6 +192,7 @@ class RobustOpenSystemSPSA:
         n_shots: int = 15,
         seeds: List[int] = (42, 123),
         x_clip: float = 3.0,
+        verbose: bool = False
     ) -> Tuple[np.ndarray, float, dict]:
         """
         核心SPSA循环：最大化目标（overall_score）
@@ -206,7 +237,7 @@ class RobustOpenSystemSPSA:
                 best_score = f_x
                 best_x = x.copy()
 
-                pulses_best, phi_best = self.vec_to_pulses_phi(best_x)
+                pulses_best, _ = self.vec_to_pulses_phi(best_x)
                 # 保存脉冲
                 np.save("pulses_spsa.npy", pulses_best)
 
@@ -221,9 +252,10 @@ class RobustOpenSystemSPSA:
                 "ck": ck,
                 "iter_time": iter_time,
             })
-
-            # 每次迭代都打印结果和消耗的时间
-            print(f"[SPSA] iter={k+1:4d} score={f_x:.6f} best={best_score:.6f} ak={ak:.3e} ck={ck:.3e} iter_time={iter_time:.2f}s")
+        
+            if verbose:
+                # 每次迭代都打印结果和消耗的时间
+                print(f"[SPSA] iter={k+1} score={f_x:.6f} best={best_score:.6f} ak={ak:.3e} ck={ck:.3e} iter_time={iter_time:.2f}s")
 
         return best_x, best_score, hist
 
@@ -231,37 +263,44 @@ class RobustOpenSystemSPSA:
             iters: int = 100,
             shots: int = 7,
             seeds: List[int] = (11, 22),
-            init_method: str = "gaussian") -> Tuple[np.ndarray, float, dict]:
+            init_method: str = "gaussian",
+            pulses_init: np.ndarray = None,
+            file_name: str = None,
+            verbose: bool = False) -> Tuple[np.ndarray, float, dict]:
         """
         init_method: 构建初始脉冲，默认使用高斯
+        verbose: 是否打印每次迭代的信息
         """
         print("计算初始分数")
         init_time = time.time()
-        if init_method == "gaussian":
-            # 构建初始脉冲（高斯面积匹配），高斯形状在量子控制中通常是较好的初始猜测。分数初始就很高
-            pulses_init = build_area_matched_gaussian(self.n_steps, self.dt, target_angle=np.pi/2)
-            # 优化参数
-            a=0.05
-            c=0.04
-        elif init_method == "random":
-            # 构建初始脉冲（随机）
-            pulses_init = self.rng.uniform(-1.0, 1.0, size=(self.n_steps, 2))
-            a=0.05
-            c=0.04
+
+        if pulses_init is None:
+            # 外界未传入脉冲，则使用内置的脉冲生成
+            if init_method == "gaussian":
+                # 高斯形状在量子控制中通常是较好的初始猜测。分数初始就很高
+                pulses_init = generate_initial_pulse(self.n_steps, self.dt, method="gaussian", target_angle=np.pi/2)
+                file_name = "gaussian"
+            elif init_method == "random":
+                # 构建初始脉冲（随机）
+                pulses_init = generate_initial_pulse(self.n_steps, self.dt, method="random", seed=self.rng_seed)
+                file_name = "random"
+            else:
+                raise ValueError(f"未知的初始脉冲构建方法: {init_method}")
         else:
-            raise ValueError(f"未知的初始脉冲构建方法: {init_method}")
+            if file_name is None:
+                file_name = "afferent"
 
         x0 = self.pulses_to_init_vec(pulses_init, phi_init=0.0)
-        init_score = self.evaluate_score(pulses_init, phi=0.0, seeds=[42], n_shots=shots)
+        init_score = self.evaluate_score(pulses_init, phi=0.0, seeds=seeds, n_shots=shots)
         init_time = time.time() - init_time
-        # 初始分数，使用42作为seed
         print(f"初始分数: {init_score:.6f}, 初始消耗时间: {init_time:.2f}s")
 
         print("开始优化迭代")
+        # 优化参数均可调整
         x_best, final_score, iter_hist = self.spsa_optimize(
             x0=x0, max_iter=iters,
-            a=a, c=c, alpha=0.602, gamma=0.101, A=10.0,
-            n_shots=shots, seeds=list(seeds))
+            a=0.05, c=0.04, alpha=0.602, gamma=0.101, A=10.0,
+            n_shots=shots, seeds=list(seeds), verbose=verbose)
         print(f"优化结束: best_score={final_score:.6f}")
 
         # 输出当前最优的脉冲
@@ -275,16 +314,26 @@ class RobustOpenSystemSPSA:
             "初始分数": init_score,
         })
         
-        # 保存脉冲
-        np.save(f"pulses_spsa_{init_method}.npy", pulses_best)
-        print(f"已保存脉冲到 pulses_spsa_{init_method}.npy")
+        try:
+            # 保存脉冲
+            np.save(f"results/pulses_spsa_{file_name}.npy", pulses_best)
+            print(f"已保存脉冲到 results/pulses_spsa_{file_name}.npy")
 
-        # 存储历史记录
-        with open(f"history_spsa_{init_method}.json", 'w') as f:
-            json.dump(iter_hist, f)
-        print(f"已保存历史记录到 history_spsa_{init_method}.json")
+            # 存储历史记录
+            with open(f"results/history_spsa_{file_name}.json", 'w') as f:
+                json.dump(iter_hist, f)
+            print(f"已保存历史记录到 results/history_spsa_{file_name}.json")
+        except:
+            # 保存脉冲
+            np.save(f"pulses_spsa_{file_name}.npy", pulses_best)
+            print(f"已保存脉冲到 pulses_spsa_{file_name}.npy")
 
-        return pulses_best, phi_best
+            # 存储历史记录
+            with open(f"history_spsa_{file_name}.json", 'w') as f:
+                json.dump(iter_hist, f)
+            print(f"已保存历史记录到 history_spsa_{file_name}.json")
+
+        return pulses_best, iter_hist
 
 
 # 定义评分函数，方便多进程调用，及结果对比
@@ -300,6 +349,62 @@ def evaluate_pulse(args, computing_method='serial'):
     )
     results = local_grader.grade_submission(pulse_data, phi, verbose=False)
     return results['overall_score'], results['gate_error'], results["gate_fidelity"],results['leakage_score'], results['penalty_score']
+
+
+# 脉冲可视化函数
+def plot_pulses(pulses, n_steps, dt=5e-10, title="优化后的脉冲"):
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    time_ns = np.arange(n_steps + 1) * dt * 1e9
+    two_pi = 2 * np.pi
+
+    ax1.step(time_ns, 
+             np.append(pulses[:, 0], pulses[-1, 0]) / (two_pi * 1e6),
+             where='post', linewidth=2, color='blue', label='Ω_re')
+    ax1.set_ylabel('Ω_re / 2π (MHz)', fontsize=12)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    ax2.step(time_ns,
+             np.append(pulses[:, 1], pulses[-1, 1]) / (two_pi * 1e6),
+             where='post', linewidth=2, color='red', label='Ω_im')
+    ax2.set_ylabel('Ω_im / 2π (MHz)', fontsize=12)
+    ax2.set_xlabel('Time (ns)', fontsize=12)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    fig.suptitle(f'{title}', 
+                 fontsize=14, fontweight='bold')
+    plt.tight_layout()
+
+
+def extract_scores_from_iter_hist(iter_hist):
+    """
+    从迭代历史记录中提取score值组成列表
+
+    """
+    scores = []
+    # 将初始值作为第一个元素
+    scores.append(iter_hist[-1]["初始分数"])
+    for record in iter_hist:
+        if "score" in record:
+            scores.append(record["score"])
+    
+    return scores
+def plot_iter_hist(iter_hist, title="优化过程中的评分变化"):
+
+
+    scores_list = extract_scores_from_iter_hist(iter_hist)
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(scores_list, linewidth=2, color='blue')
+    ax.set_ylabel('Score', fontsize=12)
+    ax.set_xlabel('Iteration', fontsize=12)
+    ax.grid(True, alpha=0.3)
+    fig.suptitle(f'{title}', 
+                 fontsize=14, fontweight='bold')
+    plt.tight_layout()
+
 
 
 if __name__ == "__main__":
@@ -322,25 +427,25 @@ if __name__ == "__main__":
         computing_method='parallel' # 评分采用并行计算
     )
 
-    optimizer = RobustOpenSystemSPSA(
+    optimizer = OpenSystemSPSA(
         grader=grader,
         n_steps=30,
         dt=5e-10,
         K=10,               # 10个结点 -> 30步插值
-        # Amax_MHz=150.0,     # 幅度上限 2π×150 MHz，2π 是切换成角频率
-        Amax_MHz=179.0,     # 幅度上限 2π×150 MHz
+        Amax_MHz=179.0,     # 幅度上限 2π×179 MHz
         smooth_len=5,       # 轻度平滑窗口
         rng_seed=1234
     )
 
-    pulses_best, phi_best = optimizer.run(
+    pulses_best, iter_hist = optimizer.run(
         iters=4000,
         shots=15,
         seeds=[42],
-        init_method="gaussian"
+        init_method="gaussian",
+        verbose=True
     )
 
     # 输出最终得分
-    print(f"最终得分（官方评分器）: {grader.grade_submission(pulses_best, phi_best, seed=42, verbose=False)['overall_score']:.6f}")
+    print(f"最终得分（官方评分器）: {grader.grade_submission(pulses_best, phi=0.0, seed=42, verbose=False)['overall_score']:.6f}")
 
 

@@ -1,4 +1,4 @@
-# cnot_pulse_optimization_simple.py
+# cnot_pulse_direct_optimization.py
 import os
 import time
 import numpy as np
@@ -85,32 +85,28 @@ def build_rectangular_pulse(n_steps: int, dt: float, target_angle: float = np.pi
     return np.column_stack([I, Q])
 
 
-def knots_to_pulses(knots: np.ndarray, n_steps: int, smooth_len: int = 5) -> np.ndarray:
+def smooth_pulses(pulses: np.ndarray, smooth_len: int = 5) -> np.ndarray:
     """
-    将K个结点线性插值到n_steps步，并进行轻度Hann平滑。
-    knots: shape (K,), 值为rad/s
+    对脉冲进行轻度Hann平滑。
+    pulses: shape (n_steps,), rad/s
     返回: shape (n_steps,), rad/s
     """
-    K = len(knots)
-    x_knots = np.linspace(0, n_steps - 1, K)
-    x = np.arange(n_steps)
-    arr = np.interp(x, x_knots, knots)
-
     # 轻度平滑，降低高频，减少P_d
     smooth_len = max(1, int(smooth_len))
     if smooth_len > 1:
         # 使用Hann窗卷积
         win = np.hanning(smooth_len)
         win = win / win.sum() if win.sum() != 0 else win
-        arr = np.convolve(arr, win, mode="same")
-    return arr
+        pulses = np.convolve(pulses, win, mode="same")
+    return pulses
 
 
 class CNOTPulseOptimizer:
     """
-    开放系统CNOT门脉冲优化（SPSA + 带限参数化）
-    - 变量：I/Q各K个结点（共2K维）
+    开放系统CNOT门脉冲优化（SPSA + 直接脉冲优化）
+    - 变量：I/Q各n_steps个脉冲值（共2*n_steps维）
     - 目标：最大化评分器overall_score（平均多个seed，包含n_shots的ensemble）
+    - 优化：直接在300个脉冲步长上进行优化，而非通过结点参数化
     """
 
     def __init__(
@@ -118,7 +114,6 @@ class CNOTPulseOptimizer:
         grader: DispersiveCNOTPulseGrader(computing_method = 'parallel'), # 评分器采用并行计算
         n_steps: int = 300,
         dt: float = 5e-10,
-        K: int = 20,
         Amax_MHz: float = 200.0,
         smooth_len: int = 5,
         rng_seed: int = 1234,
@@ -126,51 +121,49 @@ class CNOTPulseOptimizer:
         self.grader = grader
         self.n_steps = n_steps
         self.dt = dt
-        self.K = K
         self.smooth_len = smooth_len
         self.rng = np.random.RandomState(rng_seed)
 
         # 振幅上界（rad/s）
         self.Amax = 2 * np.pi * Amax_MHz * 1e6
 
-        # 变量维度：2K（I/Q结点）
-        self.dim = 2 * K
+        # 变量维度：2*n_steps（I/Q脉冲）
+        self.dim = 2 * n_steps
 
     def vec_to_pulses(self, x: np.ndarray) -> np.ndarray:
         """
         将优化变量x映射成 pulses
-        - x[:K]: I结点（以tanh映射到[-Amax,Amax]）
-        - x[K:2K]: Q结点
+        - x[:n_steps]: I脉冲值（以tanh映射到[-Amax,Amax]）
+        - x[n_steps:2*n_steps]: Q脉冲值
         """
         assert x.shape[0] == self.dim
-        sI = x[:self.K]
-        sQ = x[self.K:2*self.K]
+        # 直接使用x的前n_steps和接下来n_steps个元素作为脉冲值
+        sI = x[:self.n_steps]
+        sQ = x[self.n_steps:2*self.n_steps]
 
-        I_knots = self.Amax * np.tanh(sI)
-        Q_knots = self.Amax * np.tanh(sQ)
+        # 直接将sI和sQ映射到脉冲幅度范围
+        I_pulses = self.Amax * np.tanh(sI)
+        Q_pulses = self.Amax * np.tanh(sQ)
 
-        I = knots_to_pulses(I_knots, self.n_steps, smooth_len=self.smooth_len)
-        Q = knots_to_pulses(Q_knots, self.n_steps, smooth_len=self.smooth_len)
+        # 对脉冲进行轻度平滑处理
+        I = smooth_pulses(I_pulses, smooth_len=self.smooth_len)
+        Q = smooth_pulses(Q_pulses, smooth_len=self.smooth_len)
 
         pulses = np.column_stack([I, Q]).astype(np.float64)
         return pulses
 
     def pulses_to_init_vec(self, pulses_init: np.ndarray) -> np.ndarray:
         """
-        将一个初始脉冲（300步）压缩为K结点的x向量（通过插值逆映射+arctanh），用于SPSA初值。
+        将初始脉冲直接映射为优化变量x向量（通过arctanh反变换），用于SPSA初值。
+        - pulses_init: 初始脉冲，shape (n_steps, 2)
         """
-        # 先提取I/Q在K个结点处的值（在原300步上的线性采样）
-        x_knots = np.linspace(0, self.n_steps - 1, self.K)
-        I_knots = np.interp(x_knots, np.arange(self.n_steps), pulses_init[:, 0])
-        Q_knots = np.interp(x_knots, np.arange(self.n_steps), pulses_init[:, 1])
-
-        # 反映射： knots = Amax * tanh(s) => s = atanh(knots/Amax)
+        # 直接使用脉冲值作为初始优化变量（通过arctanh反变换）
         def safe_atanh(y):
             y = np.clip(y, -0.999, 0.999)
             return 0.5 * np.log((1 + y) / (1 - y))
 
-        xI = safe_atanh(I_knots / self.Amax)
-        xQ = safe_atanh(Q_knots / self.Amax)
+        xI = safe_atanh(pulses_init[:, 0] / self.Amax)
+        xQ = safe_atanh(pulses_init[:, 1] / self.Amax)
 
         return np.concatenate([xI, xQ]).astype(np.float64)
 
@@ -206,6 +199,7 @@ class CNOTPulseOptimizer:
         - 每步评估2次（x+/-c Δ）
         """
         x = x0.copy()
+        print(f"x shape: {x.shape}")
         best_x = x.copy()
         best_score = -1e9
         hist = [] # 存储每一次迭代的信息
@@ -295,8 +289,8 @@ class CNOTPulseOptimizer:
         elif init_method == "closed":
             # 构建初始脉冲（面积匹配），使用非零的Q路脉冲以提高初始性能
             pulses_init = np.load("/Users/fangaoming/Desktop/GitHub/PulseOptimization/code/two_qubit/results/pulses_closed.npy")
-            a = 0.20
-            c = 0.12
+            a = 0.01
+            c = 0.01
         else:
             raise ValueError("Invalid init_method")
 
@@ -331,13 +325,13 @@ class CNOTPulseOptimizer:
 
         # 最终正式评分
         final_results = self.grader.grade_submission(pulses_best, n_shots=10, seed=42, verbose=True)
-        self.grader.save_results(final_results, f"cnot_results_{init_method}.json")
+        self.grader.save_results(final_results, f"cnot_results_direct_{init_method}.json")
 
         return pulses_best, final_results
 
 
 # 定义评分函数，方便多进程调用，及结果对比
-def evaluate_pulse(args, computing_method='parallel'):
+def evaluate_pulse(args, computing_method='serial'):
     pulse_data, verbose = args
     # 为每个进程创建独立的评分器实例，使用官方评分器
     local_grader = DispersiveCNOTPulseGrader(
@@ -376,15 +370,14 @@ if __name__ == "__main__":
         grader=grader,
         n_steps=300,
         dt=5e-10,
-        K=100,              # 20个结点 -> 300步插值
-        Amax_MHz=150.0,    # 幅度上限 150 MHz
+        Amax_MHz=200.0,    # 幅度上限 150 MHz
         smooth_len=3,      # 轻度平滑窗口
         rng_seed=42
     )
 
     pulses_best, results = optimizer.run(
-        iters=200,
-        shots=5,
+        iters=100,
+        shots=10,
         seeds=[42],
         init_method="closed"
     )

@@ -5,7 +5,7 @@ from scipy.optimize import minimize
 import numpy as np
 from functools import partial
 import matplotlib.pyplot as plt
-
+import time 
 # 设置中文字体支持
 from matplotlib import rcParams
 rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
@@ -23,6 +23,37 @@ from two_transmon_grader import DispersiveCNOTPulseGrader
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="qutip")
 
+
+# Create smooth cosine pulse with much smoother transitions
+def smooth_cosine_pulse(t):
+    """Generate smooth cosine pulse with minimal high frequency components"""
+    result = np.zeros_like(t)
+    
+    # Use only fundamental frequency to minimize derivatives
+    result += 1.0 * np.cos(t)
+    
+    # Very gentle envelope to ensure smooth start and end
+    # Use raised cosine window for maximum smoothness
+    window = 0.6 * (1 - np.cos(t))  # Hann window - very smooth
+    
+    result = result * window
+    
+    return result
+
+# Imaginary part: use simplified orthogonal pulse
+def smooth_cosine_pulse_im(t):
+    """Generate smooth orthogonal pulse"""
+    result = np.zeros_like(t)
+    
+    # Fundamental frequency, 90 degree phase difference
+    result += 1.0 * np.cos(t + np.pi/2)
+    
+    # Same gentle window
+    window = 0.5 * (1 - np.cos(t))  # Hann window
+    
+    result = result * window
+    
+    return result
 
 class TwoQubitGRAPE:
     """
@@ -440,61 +471,25 @@ if __name__ == "__main__":
     initial_states = generate_initial_states(nq_levels)
     print(f"\n初态数量: {len(initial_states)}")
     
-    # 初始脉冲猜测
-    # 策略：使用自然的余弦函数叠加，创建美观的初始脉冲
+    # Initial pulse guess
+    # Strategy: Use smoother pulse shapes to reduce high frequency components
     initial_pulses = np.zeros((n_steps, 2))
-    
-    # 时间轴（归一化到[0, 2π]）
+
+    # Time axis (normalized to [0, 2π])
     t = np.linspace(0, 2*np.pi, n_steps)
-    
-    # 创建自然的余弦函数叠加
-    def natural_cosine_pulse(t):
-        """生成自然的余弦函数叠加，不进行截断"""
-        result = np.zeros_like(t)
-        
-        # 基频余弦函数
-        result += 1.0 * np.cos(t)
-        
-        # 二次谐波，创建更复杂的波形
-        result += 0.5 * np.cos(2*t)
-        
-        # 三次谐波，增加细节
-        result += 0.3 * np.cos(3*t)
-        
-        # 四次谐波，微调波形
-        result += 0.2 * np.cos(4*t)
-        
-        # 五次谐波，增加平滑度
-        result += 0.1 * np.cos(5*t)
-        
-        return result
-    
-    # 实部：使用自然余弦函数
-    envelope_re = natural_cosine_pulse(t)
-    # 归一化并设置幅度
+
+    # Real part: use smooth cosine function
+    envelope_re = smooth_cosine_pulse(t)
+    # Normalize and set amplitude
     envelope_re = envelope_re / np.max(np.abs(envelope_re))
-    initial_pulses[:, 0] = envelope_re * two_pi * 50e6  # 50 MHz幅度
-    
-    # 虚部：使用不同相位的自然余弦函数
-    def natural_cosine_pulse_im(t):
-        """生成具有相位偏移的自然余弦函数"""
-        result = np.zeros_like(t)
-        
-        # 基频余弦函数，带相位偏移
-        result += 1.0 * np.cos(t + np.pi/4)
-        
-        # 二次谐波，不同的相位偏移
-        result += 0.5 * np.cos(2*t + np.pi/6)
-        
-        # 三次谐波，不同的相位偏移
-        result += 0.3 * np.cos(3*t + np.pi/3)
-        
-        return result
-    
-    envelope_im = natural_cosine_pulse_im(t)
-    # 归一化并设置较小幅度
+    initial_pulses[:, 0] = envelope_re * two_pi * 50e6  # 50 MHz amplitude
+
+
+    envelope_im = smooth_cosine_pulse_im(t)
+    # Normalize and set amplitude
     envelope_im = envelope_im / np.max(np.abs(envelope_im))
-    initial_pulses[:, 1] = envelope_im * two_pi * 50e6  # 50 MHz幅度
+    initial_pulses[:, 1] = envelope_im * two_pi * 50e6  # 50 MHz amplitude
+
     
     # 绘制初始脉冲的波形
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
@@ -533,31 +528,6 @@ if __name__ == "__main__":
     print("\n" + "="*70)
     print("优化结果（封闭系统）")
     print("="*70)
-    
-    # 计算所有评分标准
-    gate_fidelity = grape.gate_fidelity(result.pulses, initial_states)
-    gate_error = 1.0 - gate_fidelity
-    
-    leakage = grape.compute_leakage(result.pulses, initial_states)
-    leakage_score = float(jnp.maximum(0.0, 1.0 - leakage * 5.0))
-    
-    amp_pen = grape.amplitude_penalty(result.pulses)
-    der_pen = grape.derivative_penalty(result.pulses)
-    total_penalty = amp_pen + der_pen
-    penalty_score = float(jnp.maximum(0.0, 1.0 - total_penalty))
-    
-    overall_score = (
-        0.80 * gate_fidelity +
-        0.15 * leakage_score +
-        0.05 * penalty_score
-    )
-    
-    print(f"门保真度: {gate_fidelity:.6f} (误差: {gate_error:.6f})")
-    print(f"泄漏: {leakage:.6f} (得分: {leakage_score:.6f})")
-    print(f"惩罚项: 幅度={amp_pen:.6f}, 导数={der_pen:.6f}, 总计={total_penalty:.6f} (得分: {penalty_score:.6f})")
-    print(f"综合得分: {overall_score:.6f} ({overall_score*100:.2f}%)")
-    print(f"迭代次数: {result.nit}")
-    print(f"收敛状态: {result.success}")
     
     # 保存脉冲
     np.save('pulses_closed.npy', result.pulses)

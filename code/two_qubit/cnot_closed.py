@@ -20,44 +20,66 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="qutip")
 
 
-# Create smooth cosine pulse with much smoother transitions
-def smooth_cosine_pulse(t):
-    """Generate smooth cosine pulse with minimal high frequency components"""
-    result = np.zeros_like(t)
-    
-    # Use only fundamental frequency to minimize derivatives
-    result += 1.0 * np.cos(t)
-    
-    # Very gentle envelope to ensure smooth start and end
-    # Use raised cosine window for maximum smoothness
-    window = 0.6 * (1 - np.cos(t))  # Hann window - very smooth
-    
-    result = result * window
-    
-    return result
+def cosine_pulse(n_steps=300):
+    """
+    余弦脉冲
+    """
+    # 虚部：使用简化的正交脉冲
+    def smooth_cosine_pulse_im(t):
+        """生成平滑的正交脉冲"""
+        result = np.zeros_like(t)
+        
+        # 基频，90度相位差
+        result += 1.0 * np.cos(t + np.pi/2)
+        
+        # 相同的平滑窗函数
+        window = 0.5 * (1 - np.cos(t))  # Hann窗
+        
+        result = result * window
 
-# Imaginary part: use simplified orthogonal pulse
-def smooth_cosine_pulse_im(t):
-    """Generate smooth orthogonal pulse"""
-    result = np.zeros_like(t)
-    
-    # Fundamental frequency, 90 degree phase difference
-    result += 1.0 * np.cos(t + np.pi/2)
-    
-    # Same gentle window
-    window = 0.5 * (1 - np.cos(t))  # Hann window
-    
-    result = result * window
-    
-    return result
+        return result
+
+    def smooth_cosine_pulse(t):
+        """生成具有最小高频分量的平滑余弦脉冲"""
+        result = np.zeros_like(t)
+        
+        # 仅使用基频以最小化导数
+        result += 1.0 * np.cos(t)
+        
+        # 非常平滑的包络，确保开始和结束处平滑
+        # 使用升余弦窗函数以获得最大平滑度
+        window = 0.6 * (1 - np.cos(t))  # Hann窗 - 非常平滑
+        
+        result = result * window
+        
+        return result
+
+    initial_pulses = np.zeros((n_steps, 2))
+    t = np.linspace(0, 2*np.pi, n_steps)
+
+    # 实部：使用平滑的余弦函数
+    envelope_re = smooth_cosine_pulse(t)
+    # 归一化并设置幅度
+    envelope_re = envelope_re / np.max(np.abs(envelope_re))
+    initial_pulses[:, 0] = envelope_re * 2 * np.pi * 50e6  # 50 MHz 幅度
+
+    envelope_im = smooth_cosine_pulse_im(t)
+    # 归一化并设置幅度
+    envelope_im = envelope_im / np.max(np.abs(envelope_im))
+    initial_pulses[:, 1] = envelope_im * 2 * np.pi * 50e6  # 50 MHz 幅度
+
+    return initial_pulses
+
+
 
 class TwoQubitGRAPE:
     """
     两比特系统GRAPE优化（封闭系统）
     基于色散极限的transmon耦合模型
     """
-    def __init__(self, nq_levels, omega1, omega2, omega_d, alpha1, alpha2, 
-                 J, lambda_coupling, dt, n_steps):
+    def __init__(self, nq_levels=3, omega1=2 * jnp.pi * 4.380e9, omega2=2 * jnp.pi * 4.614e9, omega_d=2 * jnp.pi * 4.498e9, 
+                 alpha1=2 * jnp.pi * 0.210e9, alpha2=2 * jnp.pi * 0.215e9, 
+                 J=2 * jnp.pi * (-0.003e9), lambda_coupling=1.03, dt=5e-10, n_steps=300):
         """
         参数:
         nq_levels: 每个transmon的能级数
@@ -310,7 +332,7 @@ class TwoQubitGRAPE:
         # 放大以改善数值条件
         return cost * 1e6
     
-    def optimize(self, initial_pulses, initial_states, maxiter=200, disp=True):
+    def optimize(self, initial_pulses, initial_states=None, maxiter=200, disp=True):
         """
         使用L-BFGS-B优化脉冲
         
@@ -318,6 +340,8 @@ class TwoQubitGRAPE:
         initial_pulses: 初始脉冲猜测 (n_steps, 2)
         initial_states: 用于优化的初态集合 (n_states, dim)
         """
+        if initial_states is None:
+            initial_states = generate_initial_states(self.nq)
         initial_states = jnp.array(initial_states)
         grad_fn = jit(grad(self.cost_function, argnums=0))
         
@@ -328,7 +352,7 @@ class TwoQubitGRAPE:
             cost = self.cost_function(params_jax, initial_states)
             gradient = grad_fn(params_jax, initial_states)
             
-            if self.iteration % 10 == 0 and disp:
+            if self.iteration % 500 == 0 and disp:
                 pulses = params_jax.reshape((self.n_steps, 2))
                 
                 # 计算所有评分标准
@@ -402,7 +426,7 @@ class TwoQubitGRAPE:
         
         return result
 
-def generate_initial_states(nq_levels):
+def generate_initial_states(nq_levels=3):
     """
     生成36个初态（6个单比特基准态的张量积）
     """
@@ -467,24 +491,8 @@ if __name__ == "__main__":
     initial_states = generate_initial_states(nq_levels)
     print(f"\n初态数量: {len(initial_states)}")
     
-    # Initial pulse guess
-    # Strategy: Use smoother pulse shapes to reduce high frequency components
-    initial_pulses = np.zeros((n_steps, 2))
-
-    # Time axis (normalized to [0, 2π])
-    t = np.linspace(0, 2*np.pi, n_steps)
-
-    # Real part: use smooth cosine function
-    envelope_re = smooth_cosine_pulse(t)
-    # Normalize and set amplitude
-    envelope_re = envelope_re / np.max(np.abs(envelope_re))
-    initial_pulses[:, 0] = envelope_re * two_pi * 50e6  # 50 MHz amplitude
-
-
-    envelope_im = smooth_cosine_pulse_im(t)
-    # Normalize and set amplitude
-    envelope_im = envelope_im / np.max(np.abs(envelope_im))
-    initial_pulses[:, 1] = envelope_im * two_pi * 50e6  # 50 MHz amplitude
+    # 生成初始脉冲 余弦函数叠加
+    initial_pulses = cosine_pulse(n_steps)
 
     
     # 绘制初始脉冲的波形
@@ -581,4 +589,4 @@ if __name__ == "__main__":
         computing_method='parallel' # 评分采用并行计算
     )
 
-    grader.grade_submission(result.pulses, n_shots=10, seed=42, verbose=True)
+    grader.grade_submission(result.pulses, n_shots=10, seed=518, verbose=True)

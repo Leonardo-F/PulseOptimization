@@ -60,7 +60,8 @@ def generate_initial_pulse(n_steps: int, dt: float, method: str = "gaussian",
                 raise ValueError("Envelope area too small.")
             amp = target_angle / area  # rad/s
             I = amp * env
-            Q = np.zeros_like(I)
+            # Q = np.zeros_like(I)
+            Q = I
             return np.column_stack([I, Q])
 
         # 生成高斯脉冲
@@ -333,7 +334,7 @@ class CNOTPulseOptimizer:
         
 
         x0 = self.pulses_to_init_vec(pulses_init)
-        init_score = self.evaluate_score(pulses_init, seeds=[42], n_shots=shots)
+        init_score = self.evaluate_score(pulses_init, seeds=seeds, n_shots=shots)
         init_time = time.time() - init_time
         print(f"初始分数: {init_score:.6f}, 初始消耗时间: {init_time:.2f}s")
 

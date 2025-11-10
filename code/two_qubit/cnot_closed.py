@@ -14,10 +14,6 @@ rcParams['axes.unicode_minus'] = False
 jax.config.update("jax_enable_x64", True)
 
 
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'official'))
-
 # 可采用多进程并行计算，对原始评分器进行了优化
 from two_transmon_grader import DispersiveCNOTPulseGrader
 import warnings

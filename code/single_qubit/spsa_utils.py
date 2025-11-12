@@ -438,14 +438,23 @@ if __name__ == "__main__":
     )
 
     pulses_best, iter_hist = optimizer.run(
-        iters=4000,
+        iters=100,
         shots=15,
         seeds=[42],
         init_method="gaussian",
         verbose=True
     )
 
+    # pulses_best, iter_hist = optimizer.run(
+    #     iters=100,
+    #     shots=15,
+    #     seeds=[42],
+    #     init_method="random",
+    #     verbose=True
+    # )
+
     # 输出最终得分
-    print(f"最终得分（官方评分器）: {grader.grade_submission(pulses_best, phi=0.0, seed=42, verbose=False)['overall_score']:.6f}")
+    print("最终得分:")
+    grader.grade_submission(pulses_best, phi=0.0, seed=42, verbose=True)
 
 

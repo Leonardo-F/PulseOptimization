@@ -11,7 +11,7 @@
 
 ## 文件说明
 
-需要注意，我们在项目中的 `.npy` 文件，若命名带有 `_best` 后缀，表示该文件为最佳结果脉冲。
+需要注意，我们在项目中的 `.npy` 文件，若命名带有 `_best` 后缀，表示该文件为最佳结果脉冲。我们方案的详细介绍，参见 [2025 SpinQ Cup 2023 Pulse Optimization](docs/2025_SpinQ_Cup_PlusesOptimization.pdf)
 
 ### 项目结构
 
@@ -36,6 +36,7 @@ PulseOptimization/
 │       ├── two_transmon_grader_origin.py   # 双比特评分器（原始版）
 │       └── results/                # 优化结果文件
 ├── docs/                           # 文档目录
+│   ├── 2025_SpinQ_Cup_PlusesOptimization.pdf  # report 文档
 │   ├── task.md                     # 赛题详细说明
 │   └── note.md                     # 技术笔记
 └── requirements.txt                # Python依赖包列表

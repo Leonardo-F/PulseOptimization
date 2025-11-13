@@ -11,7 +11,9 @@
 
 ## 文件说明
 
-需要注意，我们在项目中的 `.npy` 文件，若命名带有 `_best` 后缀，表示该文件为最佳结果脉冲。我们方案的详细介绍，参见 [2025 SpinQ Cup 2023 Pulse Optimization](docs/2025_SpinQ_Cup_PlusesOptimization.pdf)
+我们方案的详细介绍，包含单比特和双比特门，参见 [2025 SpinQ Cup Pulse Optimization](docs/2025_SpinQ_PlusesOptimization.pdf)。
+
+需要注意，我们在项目中的 `.npy` 文件，若命名带有 `_best` 后缀，表示该文件为最佳结果脉冲。同时为了与 [task](docs/task.md) 中的要求一致，我们在各文件夹下，拷贝了最优脉冲文件，均命名为 `pulses.npy` 。
 
 ### 项目结构
 
@@ -49,12 +51,6 @@ PulseOptimization/
 - `spsa_utils.py` - 包含脉冲生成、优化器、评估工具等核心函数
 - `single_transmon_grader.py` - 优化版评分器，支持并行计算加速
 
-**优化特点：**
-- 参数化脉冲设计（30步压缩为10个结点）
-- 物理约束处理（tanh函数约束幅度）
-- 多进程并行计算（性能提升5倍）
-- 鲁棒性设计（多随机种子平均）
-
 ### 双比特门优化 (two_qubit/)
 
 **主要文件：**
@@ -62,9 +58,3 @@ PulseOptimization/
 - `cnot_closed.py` - 闭合系统GRAPE优化，为开放系统优化提供良好起点
 - `cnot_spsa_utils.py` - 双比特优化的工具函数
 - `two_transmon_grader.py` - 优化版评分器，支持并行计算
-
-**优化特点：**
-- 两阶段优化策略（闭合系统+开放系统）
-- 直接脉冲优化（300维参数空间）
-- 多进程并行计算（性能提升10倍）
-- 针对耦合量子比特系统的特殊处理

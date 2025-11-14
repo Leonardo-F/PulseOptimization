@@ -71,6 +71,28 @@ def cosine_pulse(n_steps=300):
     return initial_pulses
 
 
+def random_pulse(n_steps=300, seed=None):
+    """
+    生成随机脉冲
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    # 生成随机脉冲，幅度限制在合理范围内
+    max_amplitude = 2 * np.pi * 100e6  # 100 MHz
+    
+    # 生成随机的I/Q分量
+    pulses = np.random.uniform(-1.0, 1.0, size=(n_steps, 2)) * max_amplitude
+    
+    # 可选：应用平滑以减少高频分量
+    # 使用简单的移动平均平滑
+    window_size = 5
+    for i in range(2):  # 对I和Q分别进行平滑
+        pulses[:, i] = np.convolve(pulses[:, i], np.ones(window_size)/window_size, mode='same')
+    
+    return pulses
+
+
 
 class TwoQubitGRAPE:
     """
@@ -491,8 +513,9 @@ if __name__ == "__main__":
     initial_states = generate_initial_states(nq_levels)
     print(f"\n初态数量: {len(initial_states)}")
     
-    # 生成初始脉冲 余弦函数叠加
+    # 生成初始脉冲
     initial_pulses = cosine_pulse(n_steps)
+    # initial_pulses = random_pulse(n_steps, seed=42)  # 取消注释以使用随机脉冲
 
     
     # 绘制初始脉冲的波形
@@ -514,7 +537,7 @@ if __name__ == "__main__":
     ax2.grid(True, alpha=0.3)
     ax2.legend()
     
-    fig.suptitle('初始脉冲波形（自然余弦函数叠加）', fontsize=14, fontweight='bold')
+    fig.suptitle('初始脉冲波形（余弦函数叠加/随机脉冲）', fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.savefig('initial_pulses_visualization.png', dpi=150)
     print("初始脉冲可视化已保存到: initial_pulses_visualization.png")

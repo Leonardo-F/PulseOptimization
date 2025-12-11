@@ -13,7 +13,7 @@
 
 我们方案的详细介绍，包含单比特和双比特门，参见 [2025 SpinQ Cup Pulse Optimization](docs/2025_SpinQ_PlusesOptimization.pdf)。
 
-需要注意，我们在项目中的 `.npy` 文件，若命名带有 `_best` 后缀，表示该文件为最佳结果脉冲。同时为了与 [task](docs/task.md) 中的要求一致，我们在各文件夹下，拷贝了最优脉冲文件，均命名为 `pulses.npy` 。
+需要注意，我们在项目中的 `.npy` 文件，若命名带有 `_best` 后缀，表示该文件为最佳结果脉冲。
 
 ### 项目结构
 
